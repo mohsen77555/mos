@@ -1,0 +1,30 @@
+name: Tests
+
+# يفحص صحة الجافاسكربت ويشغّل اختبارات المحرك على كل دفع وطلب دمج
+on:
+  push:
+    branches:
+      - claude/erp-program-odoo-like-2OElc
+      - master
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax check
+        run: |
+          node --check js/qr.js
+          node --check js/app.js
+
+      - name: Run test suite
+        run: node tests/run.js

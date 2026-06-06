@@ -131,8 +131,16 @@ python3 -m http.server 8000
 ├── sw.js                   # عامل الخدمة (العمل دون اتصال)
 ├── css/styles.css          # التنسيقات (RTL، سمة Odoo البنفسجية)
 ├── js/app.js               # محرّك ERP قائم على البيانات (Models/Views/Forms)
+├── js/qr.js                # مولّد رمز QR مستقل (لفاتورة ZATCA)
+├── tests/run.js            # مشغّل اختبارات Node بلا تبعيات
 └── icons/icon.svg          # أيقونة التطبيق
 ```
+
+### ✅ الاختبارات
+```bash
+node tests/run.js     # 44 تحقّقاً تغطي القيد المزدوج والمخزون والعملات والرواتب والتصنيع ورمز QR
+```
+تعمل تلقائياً على كل دفع/طلب دمج عبر GitHub Actions (`.github/workflows/test.yml`).
 
 ### 🧱 المعمارية
 محرّك **قائم على البيانات (metadata-driven)** على طراز Odoo:
