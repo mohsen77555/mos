@@ -177,7 +177,43 @@
     ok(trialBalanced(), 'الميزان متوازن بعد حذف سند');
   })();
 
-  /* 17) تصيير كل الشاشات بلا أخطاء */
+  /* 17) المخازن والتحويل المخزني */
+  (function () {
+    seedWarehouses();
+    const main = mainWh();
+    DB.data.settings.warehouses.push({ id: 'wh2', name: 'فرع' });
+    const p = DB.upsert('products', { name: 'سلعة مخزن', type: 'stock', cost: 10, qty: 30 });
+    eq(whQty(p, main), 30, 'الرصيد الافتتاحي في المخزن الرئيسي');
+    eq(whQty(p, 'wh2'), 0, 'لا رصيد في الفرع بعد');
+    createTransfer(p.id, main, 'wh2', 12);
+    eq(whQty(p, main), 18, 'نقص الرئيسي بعد التحويل');
+    eq(whQty(p, 'wh2'), 12, 'زيادة الفرع بعد التحويل');
+    eq(whQty(p, main) + whQty(p, 'wh2'), DB.get('products', p.id).qty, 'مجموع المخازن = الإجمالي');
+  })();
+
+  /* 18) ورديات نقطة البيع */
+  (function () {
+    posSessionOpen(500);
+    const s = currentPosSession();
+    ok(!!s && s.openingFloat === 500, 'فتح وردية بعهدة');
+    App.posCart = []; App.posPartner = '';
+    const pp = DB.upsert('products', { name: 'سلعة POS', type: 'stock', salePrice: 100, cost: 50, qty: 10 });
+    App.posCart = [{ productId: pp.id, qty: 1, price: 100 }];
+    posCheckout('cash');
+    posSessionClose(615);   // متوقع = 500 + 115 = 615
+    const closed = DB.list('posSessions').find(x => x.closedAt);
+    eq(closed.expected, 615, 'النقد المتوقع عند الإغلاق');
+    eq(closed.diff, 0, 'لا فرق في الصندوق');
+  })();
+
+  /* 19) إجازات الموظفين */
+  (function () {
+    const e = DB.upsert('employees', { name: 'موظف إجازة', salary: 4000 });
+    DB.upsert('leaves', { employeeId: e.id, from: '2026-05-01', to: '2026-05-05', type: 'annual' });
+    ok(DB.list('leaves').filter(l => l.employeeId === e.id).length === 1, 'تسجيل إجازة');
+  })();
+
+  /* 20) تصيير كل الشاشات بلا أخطاء */
   let viewErr = '';
   for (const r of Object.keys(Views)) { try { if (typeof Views[r]() !== 'string') throw new Error('ليست نصاً'); } catch (e) { viewErr += `${r} `; } }
   ok(!viewErr, 'تصيير كل الشاشات: ' + viewErr);

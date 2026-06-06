@@ -23,7 +23,7 @@ function makeEl() {
 globalThis.localStorage = { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } };
 globalThis.document = { body: { classList: classBag() }, getElementById: () => makeEl(), querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener: noop, createElement: () => makeEl() };
 function setGlobal(name, val) { try { globalThis[name] = val; } catch (e) { Object.defineProperty(globalThis, name, { value: val, configurable: true, writable: true }); } }
-setGlobal('window', {});
+setGlobal('window', { open: () => ({ document: { write: noop, close: noop } }) });
 setGlobal('navigator', {});
 setGlobal('requestAnimationFrame', noop);
 globalThis.confirm = () => true;

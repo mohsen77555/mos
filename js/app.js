@@ -32,6 +32,8 @@ const DB = {
       mos: [],        // أوامر التصنيع
       returns: [],    // المرتجعات (إشعارات دائن/مدين)
       vouchers: [],   // سندات القبض/الصرف والتحويلات
+      posSessions: [],// ورديات نقطة البيع
+      leaves: [],     // إجازات الموظفين
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
@@ -221,6 +223,38 @@ function seedCurrencies() {
     s.currencies.unshift({ code: 'BASE', symbol: baseSymbol(), rate: 1 });
     DB.save();
   }
+}
+
+/* ---------------------------------------------------------------------
+   المخازن (مواقع المخزون) والتحويلات
+   --------------------------------------------------------------------- */
+function seedWarehouses() {
+  const s = DB.data.settings;
+  if (!Array.isArray(s.warehouses)) s.warehouses = [];
+  if (!s.warehouses.length) { s.warehouses.push({ id: uid(), name: 'المخزن الرئيسي' }); DB.save(); }
+}
+function mainWh() { return (DB.data.settings.warehouses[0] || {}).id; }
+function whName(id) { const w = (DB.data.settings.warehouses || []).find(x => x.id === id); return w ? w.name : '—'; }
+/* مجموع حركات منتج في مخزن (wh=null لكل المخازن) */
+function moveSum(pid, wh) {
+  return DB.list('moves').filter(m => m.productId === pid && (wh == null || (m.wh || mainWh()) === wh))
+    .reduce((s, m) => s + num(m.qty), 0);
+}
+/* الرصيد الافتتاحي غير المُفسَّر بالحركات (يُنسب للمخزن الرئيسي) */
+function whBaseline(p) { return num(p.qty) - moveSum(p.id, null); }
+/* كمية منتج في مخزن معيّن */
+function whQty(p, wh) { return moveSum(p.id, wh) + (wh === mainWh() ? whBaseline(p) : 0); }
+
+/* تحويل مخزني بين موقعين (لا أثر محاسبي — نفس حساب المخزون) */
+function createTransfer(productId, fromWh, toWh, qty) {
+  qty = num(qty);
+  const p = DB.get('products', productId);
+  if (!p || qty <= 0 || fromWh === toWh) { toast('بيانات التحويل غير صحيحة'); return; }
+  if (whQty(p, fromWh) < qty) { toast('الكمية غير متوفرة في مخزن المصدر'); return; }
+  const date = todayISO();
+  DB.upsert('moves', { date, productId, qty: -qty, type: 'transfer', wh: fromWh, ref: 'تحويل → ' + whName(toWh), doc: 'transfer' });
+  DB.upsert('moves', { date, productId, qty: qty, type: 'transfer', wh: toWh, ref: 'تحويل ← ' + whName(fromWh), doc: 'transfer' });
+  toast('تم التحويل المخزني ✅');
 }
 
 /* ---------------------------------------------------------------------
@@ -628,6 +662,7 @@ const Models = {
     subtitle: r => [r.job || '', r.department || '', r.phone || ''].filter(Boolean).join(' • '),
     badge: r => r.salary ? { text: fmtMoney(r.salary), cls: 'info' } : { text: '—', cls: 'muted' },
     searchFields: ['name', 'job', 'department', 'phone', 'email'],
+    rowActions: r => `<button data-leave="${r.id}">📅 إجازة</button><button data-leaves="${r.id}">📋 الإجازات</button>`,
     fields: [
       { name: 'name', label: 'اسم الموظف *', type: 'text', required: true },
       { name: 'job', label: 'المسمى الوظيفي', type: 'text' },
@@ -949,6 +984,89 @@ function toggleReconcile(journalId) {
   DB.save();
 }
 
+/* ---------------------------------------------------------------------
+   ورديات نقطة البيع
+   --------------------------------------------------------------------- */
+function currentPosSession() { return DB.list('posSessions').find(s => !s.closedAt); }
+function posSessionOpen(float) {
+  if (currentPosSession()) { toast('توجد وردية مفتوحة بالفعل'); return; }
+  DB.upsert('posSessions', { openedAt: new Date().toISOString(), openingFloat: num(float), openedBy: Auth.user ? Auth.user.name : '', closedAt: '' });
+  toast('تم فتح الوردية ✅');
+}
+function posSessionClose(counted) {
+  const s = currentPosSession();
+  if (!s) return;
+  const sales = DB.list('sales').filter(x => x.sessionId === s.id && x.status !== 'cancel');
+  const cashSales = sales.filter(x => x.posMethod === 'cash').reduce((a, x) => a + docTotals(x).total, 0);
+  const cardSales = sales.filter(x => x.posMethod !== 'cash').reduce((a, x) => a + docTotals(x).total, 0);
+  s.closedAt = new Date().toISOString();
+  s.cashSales = cashSales; s.cardSales = cardSales; s.count = sales.length;
+  s.expected = num(s.openingFloat) + cashSales;
+  s.counted = num(counted); s.diff = +(s.counted - s.expected).toFixed(2);
+  DB.upsert('posSessions', s);
+  toast('تم إغلاق الوردية ✅');
+}
+
+/* ---------------------------------------------------------------------
+   إجازات الموظفين
+   --------------------------------------------------------------------- */
+const LEAVE_TYPES = { annual: 'سنوية', sick: 'مرضية', unpaid: 'بدون راتب', other: 'أخرى' };
+function openLeaveDialog(empId) {
+  document.getElementById('modalTitle').textContent = 'تسجيل إجازة — ' + employeeName(empId);
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>من تاريخ</label><input name="from" type="date" value="${todayISO()}" required /></div>
+    <div class="field"><label>إلى تاريخ</label><input name="to" type="date" value="${todayISO()}" required /></div>
+    <div class="field"><label>النوع</label><select name="type">${kv(LEAVE_TYPES).map(o => `<option value="${o.v}">${o.l}</option>`).join('')}</select></div>
+    <div class="field"><label>ملاحظة</label><input name="note" /></div>
+    <button type="submit" class="btn-primary">حفظ الإجازة</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    DB.upsert('leaves', { employeeId: empId, from: fd.get('from'), to: fd.get('to'), type: fd.get('type'), note: (fd.get('note') || '').trim() });
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    toast('تم تسجيل الإجازة ✅');
+    App.render();
+  };
+}
+function openLeavesList(empId) {
+  const list = DB.list('leaves').filter(l => l.employeeId === empId).sort((a, b) => (b.from || '').localeCompare(a.from || ''));
+  document.getElementById('modalTitle').textContent = 'إجازات ' + employeeName(empId);
+  const body = list.length ? list.map(l => `<div class="card" style="margin-bottom:8px"><div class="row"><div>
+      <div class="title">${esc(LEAVE_TYPES[l.type] || l.type)}</div>
+      <div class="meta">${fmtDate(l.from)} ← ${fmtDate(l.to)}${l.note ? ' • ' + esc(l.note) : ''}</div>
+    </div><button class="del" data-leave-del="${l.id}" style="border:none;background:none;cursor:pointer">🗑️</button></div></div>`).join('')
+    : emptyState('🏖️', 'لا توجد إجازات', 'سجّل إجازة من زر «إجازة».');
+  document.getElementById('modalForm').innerHTML = body + `<button type="button" class="btn-primary" id="closeLeaves">إغلاق</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('closeLeaves').onclick = closeForm;
+  document.querySelectorAll('[data-leave-del]').forEach(b => { b.onclick = () => { DB.remove('leaves', b.dataset.leaveDel); openLeavesList(empId); }; });
+}
+
+/* تحويل مخزني */
+function openTransferDialog(productId) {
+  const whs = DB.data.settings.warehouses || [];
+  if (whs.length < 2) { toast('أضِف مخزناً آخر من الإعدادات أولاً'); return; }
+  const p = DB.get('products', productId);
+  const opt = sel => whs.map(w => `<option value="${w.id}" ${w.id === sel ? 'selected' : ''}>${esc(w.name)} (${fmtQty(whQty(p, w.id))})</option>`).join('');
+  document.getElementById('modalTitle').textContent = 'تحويل مخزني — ' + esc(p.name);
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>من مخزن</label><select name="from">${opt(whs[0].id)}</select></div>
+    <div class="field"><label>إلى مخزن</label><select name="to">${opt(whs[1].id)}</select></div>
+    <div class="field"><label>الكمية</label><input name="qty" type="number" inputmode="decimal" step="any" min="0" required /></div>
+    <button type="submit" class="btn-primary">تحويل</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    createTransfer(productId, fd.get('from'), fd.get('to'), fd.get('qty'));
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    App.render();
+  };
+}
+
 /* تسجيل دفعة على مستند (payRate = سعر الصرف يوم الدفع، اختياري) */
 function registerPayment(coll, id, amount, method, payRate) {
   const doc = DB.get(coll, id);
@@ -1081,11 +1199,15 @@ const Views = {
       <button class="mini-btn" data-adjust="new">＋ تسوية مخزون</button></div>`;
     if (!items.length) return html + emptyState('🏭', 'لا توجد منتجات مخزنية', 'أضِف منتجات من تطبيق «المنتجات».');
 
+    const whs = DB.data.settings.warehouses || [];
+    const multi = whs.length > 1;
     items.forEach(p => {
       const low = num(p.qty) <= num(p.minQty);
+      const breakdown = multi ? `<div class="meta">${whs.map(w => `${esc(w.name)}: <b>${fmtQty(whQty(p, w.id))}</b>`).join(' • ')}</div>` : '';
       html += `<div class="card"><div class="row"><div>
         <div class="title">${esc(p.name)}</div>
         <div class="meta">${p.code ? 'الرمز: <b>' + esc(p.code) + '</b> • ' : ''}قيمة: <b>${fmtMoney(num(p.qty) * num(p.cost))}</b></div>
+        ${breakdown}
       </div><div style="text-align:left">
         <div class="qty-big ${low ? 'low' : ''}">${fmtQty(p.qty)} <small>${esc(p.uom || '')}</small></div>
       </div></div>
@@ -1093,6 +1215,7 @@ const Views = {
         <button data-move="${p.id}:-1">➖</button>
         <button data-move="${p.id}:1">➕</button>
         <button data-adjust="${p.id}">⚖️ تسوية</button>
+        ${multi ? `<button data-transfer="${p.id}">🔄 تحويل</button>` : ''}
         <button data-history="${p.id}">📜 الحركات</button>
       </div></div>`;
     });
@@ -1228,7 +1351,15 @@ const Views = {
     const custOpts = DB.list('partners').filter(p => p.kind !== 'vendor')
       .map(p => `<option value="${p.id}" ${App.posPartner === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
 
-    return `
+    const sess = currentPosSession();
+    const sessBar = sess
+      ? `<div class="card" style="display:flex;justify-content:space-between;align-items:center;background:#e9f7ef">
+          <div class="meta">🟢 وردية مفتوحة • عهدة: <b>${fmtMoney(sess.openingFloat)}</b> • بدأت ${fmtDate((sess.openedAt || '').slice(0, 10))}</div>
+          <button class="mini-btn" id="posCloseSess">إغلاق الوردية</button></div>`
+      : `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+          <div class="meta">🔴 لا توجد وردية مفتوحة</div>
+          <button class="mini-btn" id="posOpenSess">فتح وردية</button></div>`;
+    return sessBar + `
       <div class="pos-scan">
         <input id="posBarcode" type="text" inputmode="text" placeholder="📷 امسح أو أدخل الباركود ثم Enter" autocomplete="off" />
         <button id="posCamBtn" class="mini-btn" title="مسح بالكاميرا">📷</button>
@@ -1515,7 +1646,7 @@ const Views = {
   /* ===== الإعدادات ===== */
   settings() {
     const s = DB.data.settings;
-    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', returns: 'المرتجعات', vouchers: 'سندات الخزينة', leads: 'الفرص', boms: 'قوائم التصنيع', mos: 'أوامر التصنيع', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
+    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', returns: 'المرتجعات', vouchers: 'سندات الخزينة', posSessions: 'ورديات البيع', leads: 'الفرص', boms: 'قوائم التصنيع', mos: 'أوامر التصنيع', employees: 'الموظفون', leaves: 'الإجازات', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
     const counts = Object.keys(labels)
       .map(c => `<li>${esc(labels[c])}: <b>${DB.list(c).length}</b></li>`).join('');
     return `
@@ -1551,6 +1682,15 @@ const Views = {
             : `<button class="mini-btn" data-cur-edit="${esc(c.code)}">تعديل</button> <button class="del" data-cur-del="${esc(c.code)}" style="border:none;background:none;cursor:pointer">🗑️</button>`}</span>
         </div>`).join('')}
         <button class="mini-btn" id="addCurBtn" style="margin-top:10px">＋ إضافة عملة</button>
+      </div>
+
+      <div class="section-title">🏬 المخازن</div>
+      <div class="card">
+        ${(s.warehouses || []).map((w, i) => `<div class="rep-row">
+          <span><b>${esc(w.name)}</b>${i === 0 ? ' <span class="badge muted">رئيسي</span>' : ''}</span>
+          <span>${i === 0 ? '' : `<button class="del" data-wh-del="${w.id}" style="border:none;background:none;cursor:pointer">🗑️</button>`}</span>
+        </div>`).join('')}
+        <button class="mini-btn" id="addWhBtn" style="margin-top:10px">＋ إضافة مخزن</button>
       </div>
 
       <div class="section-title">👤 المستخدمون والصلاحيات</div>
@@ -2552,9 +2692,11 @@ function posCheckout(method) {
     .filter(l => l.productId && num(l.qty) > 0)
     .map(l => ({ productId: l.productId, name: productName(l.productId), qty: num(l.qty), price: num(l.price) }));
   if (!lines.length) return;
+  const sess = currentPosSession();
   const doc = DB.upsert('sales', {
     ref: DB.nextRef('SO'), partnerId, date: todayISO(),
     status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines, note: 'بيع نقطة بيع',
+    sessionId: sess ? sess.id : undefined, posMethod: method,
   });
   confirmDoc('sales', doc.id);
   const fresh = DB.get('sales', doc.id);
@@ -2964,6 +3106,11 @@ function bindViewEvents() {
   on('[data-csv-export]', 'click', b => exportModelCSV(b.dataset.csvExport));
   on('[data-csv-import]', 'click', b => importModelCSV(b.dataset.csvImport));
 
+  // الإجازات والتحويل المخزني
+  on('[data-leave]', 'click', b => openLeaveDialog(b.dataset.leave));
+  on('[data-leaves]', 'click', b => openLeavesList(b.dataset.leaves));
+  on('[data-transfer]', 'click', b => openTransferDialog(b.dataset.transfer));
+
   // الخزينة
   on('[data-treastab]', 'click', b => { App.treasTab = b.dataset.treastab; App.render(); });
   on('[data-voucher]', 'click', b => openVoucherDialog(b.dataset.voucher));
@@ -3051,6 +3198,20 @@ function bindViewEvents() {
   }
   const posCamBtn = document.getElementById('posCamBtn');
   if (posCamBtn) posCamBtn.onclick = () => startPosCamera();
+  const posOpenSess = document.getElementById('posOpenSess');
+  if (posOpenSess) posOpenSess.onclick = () => {
+    const f = prompt('عهدة افتتاح الصندوق (النقدية الابتدائية):', '0');
+    if (f !== null) { posSessionOpen(f); App.render(); }
+  };
+  const posCloseSess = document.getElementById('posCloseSess');
+  if (posCloseSess) posCloseSess.onclick = () => {
+    const s = currentPosSession();
+    const sales = DB.list('sales').filter(x => x.sessionId === s.id && x.status !== 'cancel');
+    const cashSales = sales.filter(x => x.posMethod === 'cash').reduce((a, x) => a + docTotals(x).total, 0);
+    const expected = num(s.openingFloat) + cashSales;
+    const c = prompt(`النقد المتوقع في الصندوق: ${fmtMoney(expected)}\nأدخل النقد المعدود فعلياً:`, String(expected));
+    if (c !== null) { posSessionClose(c); const ses = DB.list('posSessions').slice(-1)[0]; toast(`أُغلقت الوردية — الفرق: ${fmtMoney(ses.diff)}`); App.render(); }
+  };
 
   // إعدادات
   const sf = document.getElementById('settingsForm');
@@ -3095,6 +3256,18 @@ function bindViewEvents() {
       DB.data.settings.currencies = DB.data.settings.currencies.filter(c => c.code !== b.dataset.curDel);
       DB.save(); toast('تم الحذف'); App.render();
     }
+  });
+  // المخازن
+  const addWh = document.getElementById('addWhBtn');
+  if (addWh) addWh.onclick = () => {
+    const name = prompt('اسم المخزن الجديد:');
+    if (name && name.trim()) { DB.data.settings.warehouses.push({ id: uid(), name: name.trim() }); DB.save(); toast('تمت الإضافة ✅'); App.render(); }
+  };
+  on('[data-wh-del]', 'click', b => {
+    const id = b.dataset.whDel;
+    const used = DB.list('moves').some(m => m.wh === id);
+    if (used) { toast('لا يمكن حذف مخزن عليه حركات'); return; }
+    if (confirm('حذف هذا المخزن؟')) { DB.data.settings.warehouses = DB.data.settings.warehouses.filter(w => w.id !== id); DB.save(); toast('تم الحذف'); App.render(); }
   });
   // المستخدمون
   const addUser = document.getElementById('addUserBtn');
@@ -3375,6 +3548,7 @@ function importData() {
         DB.save();
         Acct.seed();
         seedCurrencies();
+        seedWarehouses();
         Auth.seed();
         if (!Auth.user || !Auth.users().find(u => u.id === Auth.user.id)) {
           Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
@@ -3399,6 +3573,7 @@ function resetData() {
   DB.save();
   Acct.seed();
   seedCurrencies();
+  seedWarehouses();
   Auth.seed();
   Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
   updateBrand();
@@ -3414,6 +3589,7 @@ function init() {
   DB.load();
   Acct.seed();
   seedCurrencies();
+  seedWarehouses();
   Auth.seed();
   updateBrand();
   applyTheme();
