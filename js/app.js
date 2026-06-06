@@ -29,12 +29,15 @@ const DB = {
       payslips: [],   // مسيّر الرواتب
       settings: {
         company: 'شركتي',
-        currency: 'ر.س',
+        currency: 'ر.س',        // رمز العملة الأساسية
         taxRate: 15,
         seq: { SO: 0, PO: 0, JE: 0, PR: 0 },
         acc: {},                 // ربط الأدوار بالحسابات (cash, ar, ...)
         accountsSeeded: false,
         lockDate: '',            // تاريخ إقفال الفترة (يمنع التعديل قبله)
+        currencies: [],          // العملات [{code, symbol, rate}] (BASE = الأساسية)
+        users: [],               // المستخدمون [{id, name, role, pin}]
+        usersSeeded: false,
       },
     };
   },
@@ -145,6 +148,101 @@ function lockedToast(date) {
   if (isLocked(date)) { toast('الفترة مقفلة — التاريخ ضمن فترة محاسبية مغلقة'); return true; }
   return false;
 }
+
+/* ---------------------------------------------------------------------
+   العملات (تعدد العملات وأسعار الصرف)
+   --------------------------------------------------------------------- */
+function baseSymbol() { return DB.data.settings.currency || 'ر.س'; }
+
+function currencies() {
+  const list = DB.data.settings.currencies || [];
+  const base = list.find(c => c.code === 'BASE');
+  if (base) base.symbol = baseSymbol();   // يبقى رمز الأساسية متزامناً
+  return list;
+}
+function getCurrency(code) {
+  return currencies().find(c => c.code === code) || { code: 'BASE', symbol: baseSymbol(), rate: 1 };
+}
+function curSymbol(code) { return getCurrency(code).symbol; }
+function docRate(doc) { return num(doc && doc.rate) || 1; }
+function docCurCode(doc) { return (doc && doc.currency) || 'BASE'; }
+/* تنسيق مبلغ بعملة محددة */
+function fmtCur(v, code) {
+  const n = num(v);
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + curSymbol(code);
+}
+/* مبلغ المستند بعملته */
+function fmtDoc(v, doc) { return fmtCur(v, docCurCode(doc)); }
+/* تحويل مبلغ المستند إلى العملة الأساسية */
+function toBase(v, doc) { return +(num(v) * docRate(doc)).toFixed(2); }
+
+function seedCurrencies() {
+  const s = DB.data.settings;
+  if (!Array.isArray(s.currencies)) s.currencies = [];
+  if (!s.currencies.find(c => c.code === 'BASE')) {
+    s.currencies.unshift({ code: 'BASE', symbol: baseSymbol(), rate: 1 });
+    DB.save();
+  }
+}
+
+/* ---------------------------------------------------------------------
+   المستخدمون والصلاحيات
+   --------------------------------------------------------------------- */
+const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales: 'بائع', viewer: 'مستعرض' };
+/* التطبيقات المسموحة لكل دور */
+const ROLE_APPS = {
+  admin: '*',
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'invoicing', 'accounting', 'payroll', 'reports'],
+  sales: ['dashboard', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing'],
+  viewer: ['dashboard', 'reports'],
+};
+
+const Auth = {
+  user: null,
+
+  seed() {
+    const s = DB.data.settings;
+    if (!Array.isArray(s.users)) s.users = [];
+    if (!s.usersSeeded || !s.users.length) {
+      if (!s.users.find(u => u.role === 'admin')) {
+        s.users.push({ id: uid(), name: 'المدير', role: 'admin', pin: '' });
+      }
+      s.usersSeeded = true;
+      DB.save();
+    }
+  },
+
+  users() { return DB.data.settings.users || []; },
+  role() { return this.user ? this.user.role : 'admin'; },
+
+  can(route) {
+    const allowed = ROLE_APPS[this.role()];
+    return allowed === '*' || (allowed && allowed.includes(route));
+  },
+  isAdmin() { return this.role() === 'admin'; },
+
+  login(id, pin) {
+    const u = this.users().find(x => x.id === id);
+    if (!u) return false;
+    if (u.pin && String(u.pin) !== String(pin)) return false;
+    this.user = u;
+    try { localStorage.setItem('mos_erp_user', id); } catch (e) {}
+    return true;
+  },
+  logout() {
+    this.user = null;
+    try { localStorage.removeItem('mos_erp_user'); } catch (e) {}
+  },
+  restore() {
+    let id = null;
+    try { id = localStorage.getItem('mos_erp_user'); } catch (e) {}
+    const u = id && this.users().find(x => x.id === id);
+    if (u && !u.pin) { this.user = u; return true; }   // استعادة فقط إن لم يكن هناك رمز
+    // إن وُجد مستخدم واحد بلا رمز → دخول تلقائي
+    if (this.users().length === 1 && !this.users()[0].pin) { this.user = this.users()[0]; return true; }
+    return false;
+  },
+};
 
 /* ---------------------------------------------------------------------
    3) القوائم الثابتة
@@ -262,9 +360,10 @@ function postDocConfirm(coll, doc) {
   const t = docTotals(doc);
   const lines = [];
   if (coll === 'sales') {
-    lines.push({ accountId: Acct.id('ar'), debit: t.total, credit: 0 });
-    lines.push({ accountId: Acct.id('sales'), debit: 0, credit: t.subtotal });
-    if (t.tax) lines.push({ accountId: Acct.id('vatOut'), debit: 0, credit: t.tax });
+    lines.push({ accountId: Acct.id('ar'), debit: toBase(t.total, doc), credit: 0 });
+    lines.push({ accountId: Acct.id('sales'), debit: 0, credit: toBase(t.subtotal, doc) });
+    if (t.tax) lines.push({ accountId: Acct.id('vatOut'), debit: 0, credit: toBase(t.tax, doc) });
+    // تكلفة البضاعة المباعة تُحسب بسعر التكلفة (العملة الأساسية)
     const cogs = (doc.lines || []).reduce((s, l) => {
       const p = DB.get('products', l.productId);
       return s + (p && p.type !== 'service' ? num(l.qty) * num(p.cost) : 0);
@@ -277,13 +376,13 @@ function postDocConfirm(coll, doc) {
     let stockSub = 0, svcSub = 0;
     (doc.lines || []).forEach(l => {
       const p = DB.get('products', l.productId);
-      const amt = num(l.qty) * num(l.price);
+      const amt = toBase(num(l.qty) * num(l.price), doc);
       if (p && p.type !== 'service') stockSub += amt; else svcSub += amt;
     });
-    if (stockSub > 0) lines.push({ accountId: Acct.id('inventory'), debit: stockSub, credit: 0 });
-    if (svcSub > 0) lines.push({ accountId: Acct.id('purchases'), debit: svcSub, credit: 0 });
-    if (t.tax) lines.push({ accountId: Acct.id('vatIn'), debit: t.tax, credit: 0 });
-    lines.push({ accountId: Acct.id('ap'), debit: 0, credit: t.total });
+    if (stockSub > 0) lines.push({ accountId: Acct.id('inventory'), debit: +stockSub.toFixed(2), credit: 0 });
+    if (svcSub > 0) lines.push({ accountId: Acct.id('purchases'), debit: +svcSub.toFixed(2), credit: 0 });
+    if (t.tax) lines.push({ accountId: Acct.id('vatIn'), debit: toBase(t.tax, doc), credit: 0 });
+    lines.push({ accountId: Acct.id('ap'), debit: 0, credit: toBase(t.total, doc) });
   }
   Acct.post({
     date: doc.date, ref: doc.ref,
@@ -295,13 +394,14 @@ function postDocConfirm(coll, doc) {
 /* ترحيل قيد دفعة */
 function postPayment(coll, doc, amt, method, paymentId) {
   const cashRole = method === 'cash' ? 'cash' : 'bank';
+  const amtB = toBase(amt, doc);
   const lines = [];
   if (coll === 'sales') {
-    lines.push({ accountId: Acct.id(cashRole), debit: amt, credit: 0 });
-    lines.push({ accountId: Acct.id('ar'), debit: 0, credit: amt });
+    lines.push({ accountId: Acct.id(cashRole), debit: amtB, credit: 0 });
+    lines.push({ accountId: Acct.id('ar'), debit: 0, credit: amtB });
   } else {
-    lines.push({ accountId: Acct.id('ap'), debit: amt, credit: 0 });
-    lines.push({ accountId: Acct.id(cashRole), debit: 0, credit: amt });
+    lines.push({ accountId: Acct.id('ap'), debit: amtB, credit: 0 });
+    lines.push({ accountId: Acct.id(cashRole), debit: 0, credit: amtB });
   }
   Acct.post({
     date: todayISO(), ref: doc.ref,
@@ -491,6 +591,7 @@ const APPS = [
   { route: 'dashboard', label: 'لوحة التحكم', icon: '📊', color: '#714B67' },
   { route: 'partners', label: 'جهات الاتصال', icon: '👥', color: '#0d6efd' },
   { route: 'products', label: 'المنتجات', icon: '📦', color: '#6610f2' },
+  { route: 'pos', label: 'نقطة البيع', icon: '🛍️', color: '#fd7e14' },
   { route: 'sales', label: 'المبيعات', icon: '🧾', color: '#198754' },
   { route: 'purchases', label: 'المشتريات', icon: '🛒', color: '#d63384' },
   { route: 'inventory', label: 'المخزون', icon: '🏭', color: '#0dcaf0' },
@@ -511,12 +612,16 @@ const App = {
   acctTab: 'accounts',   // التبويب النشط داخل المحاسبة
   ledgerAcc: '',         // الحساب المختار في دفتر الأستاذ
   payMonth: '',          // الشهر المختار في الرواتب
+  posCart: [],           // سلة نقطة البيع
+  posPartner: '',        // العميل المختار في نقطة البيع
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1 },
 
   go(route) {
+    if (!Auth.user) { showLogin(); return; }
     if (!APPS.find(a => a.route === route) && route !== 'apps') route = 'dashboard';
+    if (route !== 'apps' && !Auth.can(route)) { toast('لا تملك صلاحية لهذا التطبيق'); route = 'dashboard'; }
     this.route = route;
     this.search = '';
     const app = APPS.find(a => a.route === route);
@@ -630,6 +735,8 @@ function registerPayment(coll, id, amount, method) {
     ref: doc.ref,
     doc: coll,
     docId: id,
+    currency: docCurCode(doc),
+    rate: docRate(doc),
   });
   postPayment(coll, doc, amt, method || 'cash', pay.id);
   toast('تم تسجيل الدفعة وترحيل القيد ✅');
@@ -643,7 +750,7 @@ const Views = {
   /* ===== شاشة التطبيقات (مثل Odoo Apps) ===== */
   apps() {
     let html = '<div class="apps-grid">';
-    APPS.forEach(a => {
+    allowedApps().forEach(a => {
       html += `<button class="app-tile" data-go="${a.route}" style="--c:${a.color}">
         <span class="app-ico">${a.icon}</span><span class="app-name">${esc(a.label)}</span></button>`;
     });
@@ -657,10 +764,10 @@ const Views = {
     const products = DB.list('products');
 
     const valid = d => d.status === 'confirmed' || d.status === 'paid';
-    const salesTotal = sales.filter(valid).reduce((s, d) => s + docTotals(d).total, 0);
-    const purchTotal = purchases.filter(valid).reduce((s, d) => s + docTotals(d).total, 0);
-    const receivable = sales.filter(valid).reduce((s, d) => s + docTotals(d).due, 0);
-    const payable = purchases.filter(valid).reduce((s, d) => s + docTotals(d).due, 0);
+    const salesTotal = sales.filter(valid).reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
+    const purchTotal = purchases.filter(valid).reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
+    const receivable = sales.filter(valid).reduce((s, d) => s + toBase(docTotals(d).due, d), 0);
+    const payable = purchases.filter(valid).reduce((s, d) => s + toBase(docTotals(d).due, d), 0);
     const lowStock = products.filter(p => p.type !== 'service' && num(p.qty) <= num(p.minQty));
     const stockValue = products.reduce((s, p) => s + num(p.qty) * num(p.cost), 0);
     const cashAcc = DB.get('accounts', Acct.id('cash'));
@@ -760,8 +867,9 @@ const Views = {
     const purchases = DB.list('purchases').filter(d => d.status === 'confirmed' || d.status === 'paid');
     const payments = DB.list('payments').slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-    const totalIn = payments.filter(p => p.kind === 'in').reduce((s, p) => s + num(p.amount), 0);
-    const totalOut = payments.filter(p => p.kind === 'out').reduce((s, p) => s + num(p.amount), 0);
+    const payBase = p => num(p.amount) * (num(p.rate) || 1);
+    const totalIn = payments.filter(p => p.kind === 'in').reduce((s, p) => s + payBase(p), 0);
+    const totalOut = payments.filter(p => p.kind === 'out').reduce((s, p) => s + payBase(p), 0);
 
     let html = `<div class="stat-grid">
       <div class="stat-card" style="--c:#198754"><span class="ico">📥</span><div class="num">${fmtMoney(totalIn)}</div><div class="lbl">إجمالي المقبوضات</div></div>
@@ -787,7 +895,7 @@ const Views = {
       html += `<div class="card"><div class="row"><div>
         <div class="title">${inn ? 'قبض من' : 'صرف إلى'}: ${esc(partnerName(p.partnerId))}</div>
         <div class="meta">${fmtDate(p.date)} • ${esc(PAY_METHOD[p.method] || p.method)} • مرجع: ${esc(p.ref || '—')}</div>
-      </div><span class="badge ${inn ? 'ok' : 'danger'}">${inn ? '+' : '−'} ${fmtMoney(p.amount)}</span></div></div>`;
+      </div><span class="badge ${inn ? 'ok' : 'danger'}">${inn ? '+' : '−'} ${fmtCur(p.amount, p.currency || 'BASE')}</span></div></div>`;
     });
     return html;
   },
@@ -849,13 +957,67 @@ const Views = {
     return html;
   },
 
+  /* ===== نقطة البيع (POS) ===== */
+  pos() {
+    const products = DB.list('products');
+    if (!products.length)
+      return emptyState('🛍️', 'لا توجد منتجات', 'أضِف منتجات من تطبيق «المنتجات» للبيع السريع.');
+
+    const grid = filterBySearch(products, ['name', 'code']).map(p => {
+      const out = p.type !== 'service' && num(p.qty) <= 0;
+      return `<button class="pos-prod ${out ? 'out' : ''}" data-pos-add="${p.id}" ${out ? 'disabled' : ''}>
+        <span class="pp-name">${esc(p.name)}</span>
+        <span class="pp-price">${fmtMoney(p.salePrice)}</span>
+        ${p.type !== 'service' ? `<span class="pp-stock">${fmtQty(p.qty)}</span>` : ''}
+      </button>`;
+    }).join('');
+
+    let subtotal = 0;
+    App.posCart.forEach(l => subtotal += num(l.qty) * num(l.price));
+    const tax = subtotal * num(DB.data.settings.taxRate) / 100;
+    const total = subtotal + tax;
+
+    const cart = App.posCart.length ? App.posCart.map((l, i) => `
+      <div class="pos-line">
+        <span class="pl-name">${esc(productName(l.productId))}</span>
+        <button class="pl-btn" data-pos-dec="${i}">−</button>
+        <span class="pl-qty">${fmtQty(l.qty)}</span>
+        <button class="pl-btn" data-pos-inc="${i}">+</button>
+        <span class="pl-sum">${fmtMoney(num(l.qty) * num(l.price))}</span>
+        <button class="pl-del" data-pos-del="${i}">✕</button>
+      </div>`).join('') : `<div class="muted-text" style="padding:16px;text-align:center">السلة فارغة — اضغط على منتج لإضافته.</div>`;
+
+    const custOpts = DB.list('partners').filter(p => p.kind !== 'vendor')
+      .map(p => `<option value="${p.id}" ${App.posPartner === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+
+    return `<input class="search" id="searchInput" type="search" placeholder="ابحث عن منتج..." value="${esc(App.search)}" />
+      <div class="pos-wrap">
+        <div class="pos-grid">${grid}</div>
+        <div class="pos-cart">
+          <div class="field" style="margin-bottom:8px"><label>العميل</label>
+            <select id="posCust"><option value="">عميل نقدي</option>${custOpts}</select></div>
+          <div class="pos-lines">${cart}</div>
+          <div class="pos-totals">
+            <div class="rep-row"><span>المجموع الفرعي</span><span>${fmtMoney(subtotal)}</span></div>
+            <div class="rep-row"><span>الضريبة (${num(DB.data.settings.taxRate)}%)</span><span>${fmtMoney(tax)}</span></div>
+            <div class="rep-row strong"><span>الإجمالي</span><span>${fmtMoney(total)}</span></div>
+          </div>
+          <div class="card-actions" style="margin-top:10px">
+            <button class="pos-pay" data-pos-checkout="cash" ${App.posCart.length ? '' : 'disabled'}>💵 دفع نقدي</button>
+            <button class="pos-pay bank" data-pos-checkout="bank" ${App.posCart.length ? '' : 'disabled'}>💳 بطاقة/بنك</button>
+          </div>
+          ${App.posCart.length ? `<button class="del" id="posClear" style="width:100%;margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:9px;background:#faf9fb;cursor:pointer">🗑️ تفريغ السلة</button>` : ''}
+        </div>
+      </div>`;
+  },
+
   /* ===== التقارير ===== */
   reports() {
     const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
     const purchases = DB.list('purchases').filter(d => d.status === 'confirmed' || d.status === 'paid');
 
-    const salesTotal = sales.reduce((s, d) => s + docTotals(d).total, 0);
-    const purchTotal = purchases.reduce((s, d) => s + docTotals(d).total, 0);
+    const salesTotal = sales.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
+    const purchTotal = purchases.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
     const cogs = sales.reduce((s, d) => s + (d.lines || []).reduce((a, l) => {
       const p = DB.get('products', l.productId); return a + num(l.qty) * (p ? num(p.cost) : 0);
     }, 0), 0);
@@ -869,12 +1031,47 @@ const Views = {
       ${reportRow('صافي الربح التقديري', fmtMoney(salesTotal - purchTotal), true)}
     </div>`;
 
+    /* مخطط المبيعات مقابل المشتريات (آخر 6 أشهر) */
+    const sSeries = monthlySeries(sales);
+    const pSeries = monthlySeries(purchases);
+    const combined = sSeries.map((s, i) => ({ label: s.label, a: s.value, b: pSeries[i].value }));
+    if (combined.some(c => c.a || c.b)) {
+      html += `<div class="section-title">📊 المبيعات مقابل المشتريات</div>`;
+      html += groupedBar(combined, 'مبيعات', 'مشتريات', '#198754', '#d63384');
+    }
+
+    /* تطور صافي الربح الشهري */
+    const profitSeries = combined.map(c => ({ label: c.label, value: Math.round(c.a - c.b) }));
+    if (profitSeries.some(p => p.value)) {
+      html += `<div class="section-title">📈 صافي الربح الشهري</div>`;
+      html += barChart(profitSeries.map(p => ({ label: p.label, value: Math.max(0, p.value) })));
+    }
+
+    /* توزيع المصروفات */
+    const expItems = DB.list('accounts').filter(a => a.type === 'expense')
+      .map(a => ({ label: a.name, value: +Acct.balance(a).toFixed(2) }))
+      .filter(i => i.value > 0.005).sort((a, b) => b.value - a.value);
+    if (expItems.length) {
+      html += `<div class="section-title">💸 توزيع المصروفات</div>`;
+      html += hbar(expItems, '#dc3545');
+    }
+
+    /* أفضل العملاء */
+    const custMap = {};
+    sales.forEach(d => { custMap[d.partnerId] = (custMap[d.partnerId] || 0) + toBase(docTotals(d).total, d); });
+    const topCust = Object.entries(custMap).map(([id, v]) => ({ label: partnerName(id), value: +v.toFixed(2) }))
+      .sort((a, b) => b.value - a.value).slice(0, 6);
+    if (topCust.length) {
+      html += `<div class="section-title">👤 أفضل العملاء</div>`;
+      html += hbar(topCust, '#0d6efd');
+    }
+
     /* أفضل المنتجات مبيعاً */
     const prodMap = {};
     sales.forEach(d => (d.lines || []).forEach(l => {
       prodMap[l.productId] = prodMap[l.productId] || { qty: 0, total: 0 };
       prodMap[l.productId].qty += num(l.qty);
-      prodMap[l.productId].total += num(l.qty) * num(l.price);
+      prodMap[l.productId].total += toBase(num(l.qty) * num(l.price), d);
     }));
     const top = Object.entries(prodMap).map(([id, v]) => ({ id, ...v }))
       .sort((a, b) => b.total - a.total).slice(0, 8);
@@ -891,7 +1088,7 @@ const Views = {
     /* أرصدة جهات الاتصال */
     html += `<div class="section-title">👥 أرصدة العملاء (ذمم مدينة)</div>`;
     const balances = {};
-    sales.forEach(d => { const t = docTotals(d); if (t.due > 0.001) balances[d.partnerId] = (balances[d.partnerId] || 0) + t.due; });
+    sales.forEach(d => { const t = docTotals(d); if (t.due > 0.001) balances[d.partnerId] = (balances[d.partnerId] || 0) + toBase(t.due, d); });
     const balRows = Object.entries(balances).sort((a, b) => b[1] - a[1]);
     if (!balRows.length) html += emptyState('✅', 'لا توجد ذمم مدينة', 'كل الفواتير محصّلة.');
     balRows.forEach(([pid, due]) => {
@@ -928,6 +1125,27 @@ const Views = {
         </div>
         <div class="divider"></div>
         <div class="meta"><b>محتوى قاعدة البيانات:</b><ul class="counts">${counts}</ul></div>
+      </div>
+
+      <div class="section-title">💱 العملات وأسعار الصرف</div>
+      <div class="card">
+        ${currencies().map(c => `<div class="rep-row">
+          <span><b>${esc(c.code === 'BASE' ? 'الأساسية' : c.code)}</b> — ${esc(c.symbol)} ${c.code === 'BASE' ? '' : `<span class="muted-text">(${c.rate})</span>`}</span>
+          <span>${c.code === 'BASE'
+            ? '<span class="badge muted">أساسية</span>'
+            : `<button class="mini-btn" data-cur-edit="${esc(c.code)}">تعديل</button> <button class="del" data-cur-del="${esc(c.code)}" style="border:none;background:none;cursor:pointer">🗑️</button>`}</span>
+        </div>`).join('')}
+        <button class="mini-btn" id="addCurBtn" style="margin-top:10px">＋ إضافة عملة</button>
+      </div>
+
+      <div class="section-title">👤 المستخدمون والصلاحيات</div>
+      <div class="card">
+        ${Auth.users().map(u => `<div class="rep-row">
+          <span><b>${esc(u.name)}</b> <span class="muted-text">${esc(ROLES[u.role] || '')}</span>${u.pin ? ' 🔒' : ''}</span>
+          <span><button class="mini-btn" data-user-edit="${u.id}">تعديل</button>
+          ${Auth.users().length > 1 ? `<button class="del" data-user-del="${u.id}" style="border:none;background:none;cursor:pointer">🗑️</button>` : ''}</span>
+        </div>`).join('')}
+        <button class="mini-btn" id="addUserBtn" style="margin-top:10px">＋ إضافة مستخدم</button>
       </div>
 
       <div class="section-title">ℹ️ عن النظام</div>
@@ -1181,8 +1399,9 @@ function docCard(coll, d) {
   const isSale = coll === 'sales';
   const partyLabel = isSale ? 'العميل' : 'المورد';
   const linesHtml = (d.lines || []).map(l =>
-    `<div class="line-row"><span>${esc(productName(l.productId))} × ${fmtQty(l.qty)}</span><span>${fmtMoney(num(l.qty) * num(l.price))}</span></div>`
+    `<div class="line-row"><span>${esc(productName(l.productId))} × ${fmtQty(l.qty)}</span><span>${fmtDoc(num(l.qty) * num(l.price), d)}</span></div>`
   ).join('');
+  const curTag = docCurCode(d) !== 'BASE' ? ` <span class="badge muted">${esc(docCurCode(d))}</span>` : '';
   let actions = '';
   if (d.status === 'draft') {
     actions = `<button data-confirm="${coll}:${d.id}">✅ تأكيد</button>
@@ -1196,12 +1415,12 @@ function docCard(coll, d) {
     actions = `<button class="del" data-del="${coll}:${d.id}">🗑️ حذف</button>`;
   }
   return `<div class="card"><div class="row"><div>
-      <div class="title">${esc(d.ref || '—')} • ${esc(partnerName(d.partnerId))}</div>
+      <div class="title">${esc(d.ref || '—')} • ${esc(partnerName(d.partnerId))}${curTag}</div>
       <div class="meta">${partyLabel} • ${fmtDate(d.date)} • ${(d.lines || []).length} بند</div>
     </div><div style="text-align:left">
       <span class="badge ${st}">${esc(DOC_STATUS[d.status] || d.status)}</span>
-      <div class="title" style="margin-top:6px">${fmtMoney(t.total)}</div>
-      ${t.due > 0.001 && d.status !== 'draft' && d.status !== 'cancel' ? `<div class="meta">المتبقي: <b>${fmtMoney(t.due)}</b></div>` : ''}
+      <div class="title" style="margin-top:6px">${fmtDoc(t.total, d)}</div>
+      ${t.due > 0.001 && d.status !== 'draft' && d.status !== 'cancel' ? `<div class="meta">المتبقي: <b>${fmtDoc(t.due, d)}</b></div>` : ''}
     </div></div>
     ${linesHtml ? `<div class="lines">${linesHtml}</div>` : ''}
     ${d.note ? `<div class="meta">📝 ${esc(d.note)}</div>` : ''}
@@ -1215,7 +1434,7 @@ function docCardMini(coll, d) {
     <div class="title">${esc(d.ref || '—')} • ${esc(partnerName(d.partnerId))}</div>
     <div class="meta">${fmtDate(d.date)}</div></div>
     <div style="text-align:left"><span class="badge ${st}">${esc(DOC_STATUS[d.status])}</span>
-    <div class="title" style="margin-top:4px">${fmtMoney(t.total)}</div></div></div></div>`;
+    <div class="title" style="margin-top:4px">${fmtDoc(t.total, d)}</div></div></div></div>`;
 }
 
 function invoiceRow(coll, d) {
@@ -1223,8 +1442,8 @@ function invoiceRow(coll, d) {
   const isSale = coll === 'sales';
   return `<div class="card"><div class="row"><div>
     <div class="title">${esc(d.ref)} • ${esc(partnerName(d.partnerId))}</div>
-    <div class="meta">الإجمالي: ${fmtMoney(t.total)} • مدفوع: ${fmtMoney(t.paid)}</div>
-  </div><span class="badge ${isSale ? 'warn' : 'danger'}">متبقٍ ${fmtMoney(t.due)}</span></div>
+    <div class="meta">الإجمالي: ${fmtDoc(t.total, d)} • مدفوع: ${fmtDoc(t.paid, d)}</div>
+  </div><span class="badge ${isSale ? 'warn' : 'danger'}">متبقٍ ${fmtDoc(t.due, d)}</span></div>
   <div class="card-actions"><button data-pay="${coll}:${d.id}">💵 تسجيل دفعة</button>
     <button data-print="${coll}:${d.id}">🖨️ طباعة</button></div></div>`;
 }
@@ -1252,6 +1471,29 @@ function shortMoney(v) {
   return Math.round(v);
 }
 
+/* مخطط أعمدة مزدوج (سلسلتان) */
+function groupedBar(series, labelA, labelB, colorA, colorB) {
+  const max = Math.max(1, ...series.map(s => Math.max(s.a, s.b)));
+  const cols = series.map(s => `<div class="bar-col">
+      <div class="bar-pair">
+        <div class="bar" style="height:${Math.max((s.a / max) * 100, 2)}%;background:${colorA}"></div>
+        <div class="bar" style="height:${Math.max((s.b / max) * 100, 2)}%;background:${colorB}"></div>
+      </div><div class="bar-lbl">${esc(s.label)}</div></div>`).join('');
+  return `<div class="card">
+    <div class="chart-legend"><span><i style="background:${colorA}"></i>${esc(labelA)}</span><span><i style="background:${colorB}"></i>${esc(labelB)}</span></div>
+    <div class="bar-chart">${cols}</div></div>`;
+}
+
+/* أشرطة أفقية (نِسَب) */
+function hbar(items, color) {
+  const max = Math.max(1, ...items.map(i => i.value));
+  if (!items.length) return '';
+  return `<div class="card">` + items.map(i => `
+    <div class="hbar-row"><div class="hbar-lbl">${esc(i.label)}</div>
+      <div class="hbar-track"><div class="hbar-fill" style="width:${Math.max((i.value / max) * 100, 3)}%;background:${color || 'var(--primary)'}"></div></div>
+      <div class="hbar-val">${fmtMoney(i.value)}</div></div>`).join('') + `</div>`;
+}
+
 function monthlySeries(docs) {
   const out = [];
   const now = new Date();
@@ -1260,7 +1502,7 @@ function monthlySeries(docs) {
     const key = d.toISOString().slice(0, 7);
     const label = d.toLocaleDateString('ar-EG', { month: 'short' });
     let value = 0;
-    docs.forEach(doc => { if ((doc.date || '').slice(0, 7) === key) value += docTotals(doc).total; });
+    docs.forEach(doc => { if ((doc.date || '').slice(0, 7) === key) value += toBase(docTotals(doc).total, doc); });
     out.push({ label, value: Math.round(value) });
   }
   return out;
@@ -1336,6 +1578,11 @@ function docForm(coll, item) {
 
   let html = fieldHTML({ name: 'partnerId', label: (isSale ? 'العميل' : 'المورد') + ' *', type: 'select', required: true, options: pOpts }, item);
   html += fieldHTML({ name: 'date', label: 'التاريخ', type: 'date', default: () => todayISO() }, item);
+  if (currencies().length > 1) {
+    const curOpts = currencies().map(c => ({ v: c.code, l: c.code === 'BASE' ? `الأساسية (${c.symbol})` : `${c.code} (${c.symbol})` }));
+    html += fieldHTML({ name: 'currency', label: 'العملة', type: 'select', options: curOpts, default: 'BASE' }, item);
+    html += fieldHTML({ name: 'rate', label: 'سعر الصرف (مقابل الأساسية)', type: 'number', default: 1 }, item);
+  }
   html += `<div class="lines-editor">
       <div class="lines-head"><span>البنود</span><button type="button" class="mini-btn" id="addLineBtn">＋ بند</button></div>
       <div id="lineList"></div>
@@ -1470,6 +1717,8 @@ function submitForm(e) {
       .filter(l => l.productId && num(l.qty) > 0)
       .map(l => ({ productId: l.productId, name: productName(l.productId), qty: num(l.qty), price: num(l.price) }));
     if (!obj.lines.length) { toast('أضِف بنداً واحداً على الأقل'); return; }
+    obj.currency = obj.currency || 'BASE';
+    obj.rate = obj.currency === 'BASE' ? 1 : (num(obj.rate) || 1);
     if (!id) {
       obj.status = 'draft';
       obj.paid = 0;
@@ -1499,9 +1748,10 @@ function openPayDialog(coll, id) {
   document.getElementById('modalTitle').textContent = 'تسجيل دفعة — ' + (doc.ref || '');
   document.getElementById('modalForm').innerHTML = `
     <div class="card report-table" style="margin:0 0 12px">
-      ${reportRow('الإجمالي', fmtMoney(t.total))}
-      ${reportRow('المدفوع', fmtMoney(t.paid))}
-      ${reportRow('المتبقي', fmtMoney(t.due), true)}
+      ${reportRow('الإجمالي', fmtDoc(t.total, doc))}
+      ${reportRow('المدفوع', fmtDoc(t.paid, doc))}
+      ${reportRow('المتبقي', fmtDoc(t.due, doc), true)}
+      ${docCurCode(doc) !== 'BASE' ? reportRow('سعر الصرف', docRate(doc) + ' / ' + baseSymbol()) : ''}
     </div>
     <div class="field"><label>المبلغ</label><input name="amount" type="number" inputmode="decimal" step="any" min="0" value="${t.due}" required /></div>
     <div class="field"><label>طريقة الدفع</label><select name="method">${kv(PAY_METHOD).map(o => `<option value="${o.v}">${o.l}</option>`).join('')}</select></div>
@@ -1662,8 +1912,8 @@ function printDoc(coll, id) {
   const isSale = coll === 'sales';
   const rows = (doc.lines || []).map((l, i) => `
     <tr><td>${i + 1}</td><td>${esc(productName(l.productId))}</td>
-    <td>${fmtQty(l.qty)}</td><td>${fmtMoney(l.price)}</td>
-    <td>${fmtMoney(num(l.qty) * num(l.price))}</td></tr>`).join('');
+    <td>${fmtQty(l.qty)}</td><td>${fmtDoc(l.price, doc)}</td>
+    <td>${fmtDoc(num(l.qty) * num(l.price), doc)}</td></tr>`).join('');
   const w = window.open('', '_blank');
   if (!w) { toast('فعّل النوافذ المنبثقة للطباعة'); return; }
   w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
@@ -1686,11 +1936,11 @@ function printDoc(coll, id) {
     <table><thead><tr><th>#</th><th>المنتج</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <div class="totals">
-      <div class="r"><span>المجموع الفرعي</span><span>${fmtMoney(t.subtotal)}</span></div>
-      <div class="r"><span>الضريبة (${s.taxRate}%)</span><span>${fmtMoney(t.tax)}</span></div>
-      <div class="r s"><span>الإجمالي</span><span>${fmtMoney(t.total)}</span></div>
-      <div class="r"><span>المدفوع</span><span>${fmtMoney(t.paid)}</span></div>
-      <div class="r"><span>المتبقي</span><span>${fmtMoney(t.due)}</span></div>
+      <div class="r"><span>المجموع الفرعي</span><span>${fmtDoc(t.subtotal, doc)}</span></div>
+      <div class="r"><span>الضريبة (${s.taxRate}%)</span><span>${fmtDoc(t.tax, doc)}</span></div>
+      <div class="r s"><span>الإجمالي</span><span>${fmtDoc(t.total, doc)}</span></div>
+      <div class="r"><span>المدفوع</span><span>${fmtDoc(t.paid, doc)}</span></div>
+      <div class="r"><span>المتبقي</span><span>${fmtDoc(t.due, doc)}</span></div>
     </div>
     <script>window.onload=function(){window.print()}<\/script>
     </body></html>`);
@@ -1763,12 +2013,13 @@ function printPayslip(id) {
 function buildStatement(partnerId) {
   const rows = [];
   DB.list('sales').filter(d => d.partnerId === partnerId && d.status !== 'draft' && d.status !== 'cancel')
-    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مبيعات', debit: docTotals(d).total, credit: 0 }));
+    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مبيعات', debit: toBase(docTotals(d).total, d), credit: 0 }));
   DB.list('purchases').filter(d => d.partnerId === partnerId && d.status !== 'draft' && d.status !== 'cancel')
-    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مشتريات', debit: 0, credit: docTotals(d).total }));
+    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مشتريات', debit: 0, credit: toBase(docTotals(d).total, d) }));
   DB.list('payments').filter(pm => pm.partnerId === partnerId).forEach(pm => {
-    if (pm.kind === 'in') rows.push({ date: pm.date, ref: pm.ref, desc: 'تحصيل (' + (PAY_METHOD[pm.method] || '') + ')', debit: 0, credit: num(pm.amount) });
-    else rows.push({ date: pm.date, ref: pm.ref, desc: 'سداد (' + (PAY_METHOD[pm.method] || '') + ')', debit: num(pm.amount), credit: 0 });
+    const amtB = num(pm.amount) * (num(pm.rate) || 1);
+    if (pm.kind === 'in') rows.push({ date: pm.date, ref: pm.ref, desc: 'تحصيل (' + (PAY_METHOD[pm.method] || '') + ')', debit: 0, credit: amtB });
+    else rows.push({ date: pm.date, ref: pm.ref, desc: 'سداد (' + (PAY_METHOD[pm.method] || '') + ')', debit: amtB, credit: 0 });
   });
   rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   let bal = 0;
@@ -1801,6 +2052,109 @@ function printStatement(partnerId) {
     <div class="tot">الرصيد النهائي: ${fmtMoney(Math.abs(balance))} — ${sign}</div>
     <script>window.onload=function(){window.print()}<\/script></body></html>`);
   w.document.close();
+}
+
+/* ---------------------------------------------------------------------
+   نقطة البيع (POS)
+   --------------------------------------------------------------------- */
+function posAdd(productId) {
+  const p = DB.get('products', productId);
+  if (!p) return;
+  const line = App.posCart.find(l => l.productId === productId);
+  if (line) line.qty = num(line.qty) + 1;
+  else App.posCart.push({ productId, qty: 1, price: num(p.salePrice) });
+  App.render();
+}
+
+function posWalkInPartner() {
+  let p = DB.list('partners').find(x => x.name === 'عميل نقدي');
+  if (!p) p = DB.upsert('partners', { name: 'عميل نقدي', kind: 'customer' });
+  return p.id;
+}
+
+function posCheckout(method) {
+  if (lockedToast(todayISO())) return;
+  if (!App.posCart.length) return;
+  const partnerId = App.posPartner || posWalkInPartner();
+  const lines = App.posCart
+    .filter(l => l.productId && num(l.qty) > 0)
+    .map(l => ({ productId: l.productId, name: productName(l.productId), qty: num(l.qty), price: num(l.price) }));
+  if (!lines.length) return;
+  const doc = DB.upsert('sales', {
+    ref: DB.nextRef('SO'), partnerId, date: todayISO(),
+    status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines, note: 'بيع نقطة بيع',
+  });
+  confirmDoc('sales', doc.id);
+  const fresh = DB.get('sales', doc.id);
+  if (fresh.status !== 'confirmed') return;   // مُنع (مثلاً فترة مقفلة)
+  registerPayment('sales', doc.id, docTotals(fresh).total, method);
+  const printId = doc.id;
+  App.posCart = [];
+  App.posPartner = '';
+  toast('تم البيع بنجاح ✅');
+  App.render();
+  if (confirm('طباعة الإيصال؟')) printDoc('sales', printId);
+}
+
+/* ---------------------------------------------------------------------
+   حوارات العملات والمستخدمين (الإعدادات)
+   --------------------------------------------------------------------- */
+function openCurrencyDialog(code) {
+  const cur = code ? getCurrency(code) : { code: '', symbol: '', rate: 1 };
+  document.getElementById('modalTitle').textContent = code ? 'تعديل عملة' : 'إضافة عملة';
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>رمز العملة (مثل USD) *</label><input name="code" value="${esc(cur.code)}" ${code ? 'readonly' : 'required'} /></div>
+    <div class="field"><label>الرمز المعروض (مثل $) *</label><input name="symbol" value="${esc(cur.symbol)}" required /></div>
+    <div class="field"><label>سعر الصرف (قيمة الوحدة بالعملة الأساسية) *</label><input name="rate" type="number" inputmode="decimal" step="any" min="0" value="${esc(cur.rate)}" required /></div>
+    <button type="submit" class="btn-primary">حفظ</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const c = (fd.get('code') || '').trim().toUpperCase();
+    if (!c || c === 'BASE') { toast('رمز غير صالح'); return; }
+    const list = DB.data.settings.currencies;
+    const ex = list.find(x => x.code === c);
+    const obj = { code: c, symbol: (fd.get('symbol') || '').trim(), rate: num(fd.get('rate')) || 1 };
+    if (ex) Object.assign(ex, obj); else list.push(obj);
+    DB.save();
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    toast('تم حفظ العملة ✅');
+    App.render();
+  };
+}
+
+function openUserDialog(id) {
+  const u = id ? Auth.users().find(x => x.id === id) : { name: '', role: 'sales', pin: '' };
+  document.getElementById('modalTitle').textContent = id ? 'تعديل مستخدم' : 'مستخدم جديد';
+  const roleOpts = kv(ROLES).map(o => `<option value="${o.v}" ${u.role === o.v ? 'selected' : ''}>${o.l}</option>`).join('');
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>الاسم *</label><input name="name" value="${esc(u.name)}" required /></div>
+    <div class="field"><label>الدور</label><select name="role">${roleOpts}</select></div>
+    <div class="field"><label>رمز الدخول PIN (اختياري)</label><input name="pin" type="text" inputmode="numeric" value="${esc(u.pin || '')}" placeholder="اتركه فارغاً لدخول بلا رمز" /></div>
+    <button type="submit" class="btn-primary">حفظ</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const obj = { name: (fd.get('name') || '').trim(), role: fd.get('role'), pin: (fd.get('pin') || '').trim() };
+    const users = DB.data.settings.users;
+    if (id) {
+      const ex = users.find(x => x.id === id);
+      // منع إزالة آخر مدير
+      if (ex.role === 'admin' && obj.role !== 'admin' && users.filter(x => x.role === 'admin').length === 1) { toast('يجب بقاء مدير واحد على الأقل'); return; }
+      Object.assign(ex, obj);
+      if (Auth.user && Auth.user.id === id) Auth.user = ex;
+    } else {
+      users.push({ id: uid(), ...obj });
+    }
+    DB.save();
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    toast('تم حفظ المستخدم ✅');
+    App.render();
+  };
 }
 
 /* ---------------------------------------------------------------------
@@ -1890,6 +2244,17 @@ function bindViewEvents() {
     if (confirm('حذف القسيمة؟')) { deletePayslip(b.dataset.pslipDel); toast('تم الحذف'); App.render(); }
   });
 
+  // نقطة البيع
+  on('[data-pos-add]', 'click', b => posAdd(b.dataset.posAdd));
+  on('[data-pos-inc]', 'click', b => { App.posCart[+b.dataset.posInc].qty++; App.render(); });
+  on('[data-pos-dec]', 'click', b => { const l = App.posCart[+b.dataset.posDec]; l.qty = Math.max(1, num(l.qty) - 1); App.render(); });
+  on('[data-pos-del]', 'click', b => { App.posCart.splice(+b.dataset.posDel, 1); App.render(); });
+  on('[data-pos-checkout]', 'click', b => posCheckout(b.dataset.posCheckout));
+  const posCust = document.getElementById('posCust');
+  if (posCust) posCust.onchange = () => { App.posPartner = posCust.value; };
+  const posClear = document.getElementById('posClear');
+  if (posClear) posClear.onclick = () => { App.posCart = []; App.render(); };
+
   // إعدادات
   const sf = document.getElementById('settingsForm');
   if (sf) sf.onsubmit = (e) => {
@@ -1908,6 +2273,30 @@ function bindViewEvents() {
     else if (b.dataset.action === 'import') importData();
     else if (b.dataset.action === 'reset') resetData();
   });
+
+  // العملات
+  const addCur = document.getElementById('addCurBtn');
+  if (addCur) addCur.onclick = () => openCurrencyDialog();
+  on('[data-cur-edit]', 'click', b => openCurrencyDialog(b.dataset.curEdit));
+  on('[data-cur-del]', 'click', b => {
+    if (confirm('حذف هذه العملة؟')) {
+      DB.data.settings.currencies = DB.data.settings.currencies.filter(c => c.code !== b.dataset.curDel);
+      DB.save(); toast('تم الحذف'); App.render();
+    }
+  });
+  // المستخدمون
+  const addUser = document.getElementById('addUserBtn');
+  if (addUser) addUser.onclick = () => openUserDialog();
+  on('[data-user-edit]', 'click', b => openUserDialog(b.dataset.userEdit));
+  on('[data-user-del]', 'click', b => {
+    const users = DB.data.settings.users;
+    const u = users.find(x => x.id === b.dataset.userDel);
+    if (u && u.role === 'admin' && users.filter(x => x.role === 'admin').length === 1) { toast('يجب بقاء مدير واحد'); return; }
+    if (confirm('حذف هذا المستخدم؟')) {
+      DB.data.settings.users = users.filter(x => x.id !== b.dataset.userDel);
+      DB.save(); toast('تم الحذف'); App.render();
+    }
+  });
 }
 
 function on(sel, ev, fn) {
@@ -1917,13 +2306,49 @@ function on(sel, ev, fn) {
 /* ---------------------------------------------------------------------
    16) القائمة الجانبية (Drawer)
    --------------------------------------------------------------------- */
+function allowedApps() { return APPS.filter(a => Auth.can(a.route)); }
+
 function buildDrawer() {
-  document.getElementById('drawerNav').innerHTML = APPS.map(a =>
+  const apps = allowedApps().map(a =>
     `<button class="drawer-item ${App.route === a.route ? 'active' : ''}" data-go="${a.route}">
       <span class="d-ico" style="color:${a.color}">${a.icon}</span><span>${esc(a.label)}</span></button>`
   ).join('');
+  const u = Auth.user;
+  const footer = u ? `<div class="drawer-foot">
+      <div class="du-info"><span class="du-name">${esc(u.name)}</span><span class="du-role">${esc(ROLES[u.role] || '')}</span></div>
+      <button class="du-logout" id="logoutBtn">🚪 خروج</button>
+    </div>` : '';
+  document.getElementById('drawerNav').innerHTML = apps + footer;
   document.querySelectorAll('#drawerNav .drawer-item').forEach(b => {
     b.onclick = () => App.go(b.dataset.go);
+  });
+  const lo = document.getElementById('logoutBtn');
+  if (lo) lo.onclick = () => { Auth.logout(); closeDrawer(); showLogin(); };
+}
+
+/* شاشة تسجيل الدخول */
+function showLogin() {
+  Auth.user = null;
+  closeDrawer();
+  document.getElementById('fab').classList.add('hidden');
+  document.getElementById('pageTitle').textContent = 'تسجيل الدخول';
+  const roleIco = { admin: '👑', accountant: '🧮', sales: '🛍️', viewer: '👁️' };
+  const tiles = Auth.users().map(u => `<button class="login-tile" data-login="${u.id}">
+      <span class="lt-ico">${roleIco[u.role] || '👤'}</span>
+      <span class="lt-name">${esc(u.name)}</span>
+      <span class="lt-role">${esc(ROLES[u.role] || '')}${u.pin ? ' 🔒' : ''}</span>
+    </button>`).join('');
+  document.getElementById('view').innerHTML = `<div class="login-screen">
+      <div class="login-brand">MOS&nbsp;<b>ERP</b></div>
+      <div class="login-sub">اختر المستخدم للدخول</div>
+      <div class="login-grid">${tiles}</div></div>`;
+  document.querySelectorAll('[data-login]').forEach(b => {
+    b.onclick = () => {
+      const u = Auth.users().find(x => x.id === b.dataset.login);
+      const pin = u.pin ? (prompt('أدخل رمز الدخول (PIN):') || '') : '';
+      if (Auth.login(u.id, pin)) App.go('dashboard');
+      else toast('رمز الدخول غير صحيح');
+    };
   });
 }
 
@@ -1974,9 +2399,14 @@ function importData() {
         DB.data.settings.seq = Object.assign(DB.defaults().settings.seq, (parsed.settings || {}).seq || {});
         DB.save();
         Acct.seed();
+        seedCurrencies();
+        Auth.seed();
+        if (!Auth.user || !Auth.users().find(u => u.id === Auth.user.id)) {
+          Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
+        }
         updateBrand();
         toast('تم استيراد البيانات بنجاح ✅');
-        App.go('dashboard');
+        if (Auth.user) App.go('dashboard'); else showLogin();
       } catch (e) {
         alert('تعذّر استيراد الملف: صيغة غير صالحة.');
       }
@@ -1992,9 +2422,12 @@ function resetData() {
   DB.data = DB.defaults();
   DB.save();
   Acct.seed();
+  seedCurrencies();
+  Auth.seed();
+  Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
   updateBrand();
   toast('تم تصفير البيانات');
-  App.go('dashboard');
+  if (Auth.user) App.go('dashboard'); else showLogin();
 }
 
 /* ---------------------------------------------------------------------
@@ -2003,6 +2436,8 @@ function resetData() {
 function init() {
   DB.load();
   Acct.seed();
+  seedCurrencies();
+  Auth.seed();
   updateBrand();
 
   document.getElementById('menuBtn').onclick = openDrawer;
@@ -2021,7 +2456,8 @@ function init() {
   document.getElementById('modal').onclick = (e) => { if (e.target.id === 'modal') closeForm(); };
   document.getElementById('modalForm').onsubmit = submitForm;
 
-  App.go('dashboard');
+  if (Auth.restore()) App.go('dashboard');
+  else showLogin();
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

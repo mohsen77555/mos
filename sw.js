@@ -1,5 +1,5 @@
 /* عامل الخدمة — يتيح عمل MOS ERP دون اتصال بالإنترنت */
-const CACHE = 'mos-erp-v1';
+const CACHE = 'mos-erp-v2';
 const ASSETS = [
   './',
   './index.html',
