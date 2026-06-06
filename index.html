@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="theme-color" content="#8a5a2b" />
-  <meta name="description" content="تطبيق صيانة مطحنة الدقيق - إدارة المعدات والصيانة وأوامر العمل وقطع الغيار" />
-  <title>صيانة المطحنة</title>
+  <meta name="theme-color" content="#714B67" />
+  <meta name="description" content="نظام تخطيط موارد المؤسسات (ERP) عربي بالكامل — مبيعات ومشتريات ومخزون ومحاسبة وموارد بشرية، يعمل دون اتصال." />
+  <title>MOS ERP — نظام إدارة الأعمال</title>
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="icons/icon.svg" />
@@ -16,30 +16,26 @@
   <header class="appbar">
     <button id="menuBtn" class="icon-btn" aria-label="القائمة">☰</button>
     <h1 id="pageTitle">لوحة التحكم</h1>
-    <button id="exportBtn" class="icon-btn" aria-label="نسخة احتياطية" title="نسخ/استرجاع البيانات">⇅</button>
+    <div class="appbar-actions">
+      <button id="homeBtn" class="icon-btn" aria-label="التطبيقات" title="التطبيقات">▦</button>
+      <button id="exportBtn" class="icon-btn" aria-label="نسخة احتياطية" title="نسخ/استرجاع البيانات">⇅</button>
+    </div>
   </header>
+
+  <!-- القائمة الجانبية (Drawer) -->
+  <div id="drawer" class="drawer hidden">
+    <div class="drawer-overlay" id="drawerOverlay"></div>
+    <aside class="drawer-panel">
+      <div class="drawer-head">
+        <span class="brand">MOS&nbsp;<b>ERP</b></span>
+        <span class="brand-sub" id="brandCompany">شركتي</span>
+      </div>
+      <nav id="drawerNav" class="drawer-nav"></nav>
+    </aside>
+  </div>
 
   <!-- المحتوى الرئيسي -->
   <main id="view" class="view"></main>
-
-  <!-- شريط التنقل السفلي -->
-  <nav class="tabbar" id="tabbar">
-    <button class="tab active" data-route="dashboard">
-      <span class="tab-ico">🏠</span><span>الرئيسية</span>
-    </button>
-    <button class="tab" data-route="equipment">
-      <span class="tab-ico">⚙️</span><span>المعدات</span>
-    </button>
-    <button class="tab" data-route="maintenance">
-      <span class="tab-ico">🗓️</span><span>الصيانة</span>
-    </button>
-    <button class="tab" data-route="workorders">
-      <span class="tab-ico">🔧</span><span>أوامر العمل</span>
-    </button>
-    <button class="tab" data-route="parts">
-      <span class="tab-ico">📦</span><span>قطع الغيار</span>
-    </button>
-  </nav>
 
   <!-- زر الإضافة العائم -->
   <button id="fab" class="fab" aria-label="إضافة">＋</button>
@@ -51,7 +47,7 @@
         <h2 id="modalTitle">عنوان</h2>
         <button id="modalClose" class="icon-btn" aria-label="إغلاق">✕</button>
       </div>
-      <form id="modalForm" class="modal-body"></form>
+      <form id="modalForm" class="modal-body" autocomplete="off"></form>
     </div>
   </div>
 

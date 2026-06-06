@@ -1,5 +1,5 @@
-/* عامل الخدمة — يتيح عمل التطبيق دون اتصال بالإنترنت */
-const CACHE = 'mill-maint-v1';
+/* عامل الخدمة — يتيح عمل MOS ERP دون اتصال بالإنترنت */
+const CACHE = 'mos-erp-v1';
 const ASSETS = [
   './',
   './index.html',
