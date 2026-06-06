@@ -271,6 +271,33 @@ ul { margin: 6px 0; padding-inline-start: 20px; }
 .ln-del { background: #fbe4e1; color: var(--danger); border: none; border-radius: 8px; cursor: pointer; height: 36px; font-size: 1rem; }
 .line-totals { border-top: 1px dashed var(--border); margin-top: 6px; padding-top: 4px; }
 
+/* ===== المحاسبة ===== */
+.acct-tabs {
+  display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px;
+  margin-bottom: 6px; -webkit-overflow-scrolling: touch;
+}
+.acct-tab {
+  flex: 0 0 auto; border: 1px solid var(--border); background: var(--surface);
+  color: var(--muted); padding: 8px 14px; border-radius: 999px;
+  font-size: .85rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.acct-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+.acct-table-wrap { padding: 0; overflow-x: auto; }
+.acct-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.acct-table th, .acct-table td { padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.acct-table thead th { background: #f3eef2; color: var(--primary-dark); font-weight: 700; }
+.acct-table tfoot td { font-weight: 800; background: #faf9fb; border-top: 2px solid var(--primary); }
+
+.je-lines { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 6px; font-size: .82rem; }
+.je-line { display: grid; grid-template-columns: 1fr 90px 90px; gap: 4px; padding: 3px 0; }
+.je-line.je-head { color: var(--muted); font-weight: 700; border-bottom: 1px solid var(--border); }
+.je-dr { color: var(--ok); text-align: left; }
+.je-cr { color: var(--danger); text-align: left; }
+
+.je-edit { display: grid; grid-template-columns: 1fr 70px 70px 32px; gap: 6px; margin-bottom: 8px; align-items: center; }
+.je-edit select, .je-edit input { padding: 8px; font-size: .82rem; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+
 /* ===== الحالة الفارغة ===== */
 .empty { text-align: center; color: var(--muted); padding: 46px 20px; }
 .empty .big { font-size: 3rem; margin-bottom: 10px; }
