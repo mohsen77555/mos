@@ -117,7 +117,26 @@
   /* 11) تعدد العملات في التقارير (تحويل للأساسية) */
   ok(toBase(100, { rate: 3.7 }) === 370, 'تحويل المبلغ للعملة الأساسية');
 
-  /* 12) تصيير كل الشاشات بلا أخطاء */
+  /* 12) تشفير الـ PIN والترقية */
+  ok(hashPin('1234') === hashPin('1234') && hashPin('1234') !== hashPin('1235'), 'تجزئة الـ PIN ثابتة ومميِّزة');
+  (function () {
+    const u = { id: 'p1', name: 'م', role: 'sales', pin: '4321' };
+    DB.data.settings.users.push(u); DB.data.settings.dbVersion = 0; DB.migrate();
+    const mu = Auth.users().find(x => x.id === 'p1');
+    ok(!mu.pin && mu.pinHash === hashPin('4321'), 'ترقية: تحويل PIN نصّي إلى تجزئة');
+    Auth.user = null;
+    ok(Auth.login('p1', '4321') && !Auth.login('p1', '0000'), 'تسجيل الدخول بالرمز المجزّأ');
+    DB.data.settings.users = DB.data.settings.users.filter(x => x.id !== 'p1');
+    Auth.user = Auth.users()[0];
+  })();
+
+  /* 13) تحليل CSV */
+  (function () {
+    const rows = parseCSV('name,phone\n"علي, محمد",055\nسارة,066');
+    ok(rows.length === 3 && rows[1][0] === 'علي, محمد' && rows[2][1] === '066', 'تحليل CSV مع اقتباس وفواصل');
+  })();
+
+  /* 14) تصيير كل الشاشات بلا أخطاء */
   let viewErr = '';
   for (const r of Object.keys(Views)) { try { if (typeof Views[r]() !== 'string') throw new Error('ليست نصاً'); } catch (e) { viewErr += `${r} `; } }
   ok(!viewErr, 'تصيير كل الشاشات: ' + viewErr);

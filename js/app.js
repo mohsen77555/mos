@@ -43,6 +43,9 @@ const DB = {
         users: [],               // المستخدمون [{id, name, role, pin}]
         usersSeeded: false,
         theme: 'light',          // السمة: فاتح / داكن
+        dbVersion: 0,            // نسخة قاعدة البيانات (للترقيات)
+        warehouses: [],          // المخازن
+        reconciled: {},          // أسطر القيود المسوّاة بنكياً { journalId: true }
       },
     };
   },
@@ -63,7 +66,20 @@ const DB = {
         this.data[k] = [];
       }
     }
+    this.migrate();
     return this.data;
+  },
+
+  /* ترقيات قاعدة البيانات حسب النسخة */
+  migrate() {
+    const s = this.data.settings;
+    if (s.dbVersion == null) s.dbVersion = 0;
+    if (s.dbVersion < 2) {
+      // ترقية 2: تحويل رموز PIN النصّية إلى تجزئة (hash)
+      (s.users || []).forEach(u => { if (u.pin) { u.pinHash = hashPin(u.pin); delete u.pin; } });
+      s.dbVersion = 2;
+    }
+    this.save();
   },
 
   save() { localStorage.setItem(this.key, JSON.stringify(this.data)); },
@@ -103,6 +119,20 @@ const DB = {
    2) أدوات مساعدة
    --------------------------------------------------------------------- */
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+/* تجزئة رمز الدخول (cyrb53) — لإخفاء الـ PIN بدل تخزينه نصّاً */
+function hashPin(str) {
+  str = String(str);
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -227,10 +257,13 @@ const Auth = {
   },
   isAdmin() { return this.role() === 'admin'; },
 
+  hasPin(u) { return !!(u && (u.pinHash || u.pin)); },
+
   login(id, pin) {
     const u = this.users().find(x => x.id === id);
     if (!u) return false;
-    if (u.pin && String(u.pin) !== String(pin)) return false;
+    if (u.pinHash) { if (hashPin(pin) !== u.pinHash) return false; }
+    else if (u.pin && String(u.pin) !== String(pin)) return false;   // توافق قديم
     this.user = u;
     try { localStorage.setItem('mos_erp_user', id); } catch (e) {}
     return true;
@@ -243,9 +276,9 @@ const Auth = {
     let id = null;
     try { id = localStorage.getItem('mos_erp_user'); } catch (e) {}
     const u = id && this.users().find(x => x.id === id);
-    if (u && !u.pin) { this.user = u; return true; }   // استعادة فقط إن لم يكن هناك رمز
+    if (u && !this.hasPin(u)) { this.user = u; return true; }   // استعادة فقط إن لم يكن هناك رمز
     // إن وُجد مستخدم واحد بلا رمز → دخول تلقائي
-    if (this.users().length === 1 && !this.users()[0].pin) { this.user = this.users()[0]; return true; }
+    if (this.users().length === 1 && !this.hasPin(this.users()[0])) { this.user = this.users()[0]; return true; }
     return false;
   },
 };
@@ -1327,7 +1360,7 @@ const Views = {
       <div class="section-title">👤 المستخدمون والصلاحيات</div>
       <div class="card">
         ${Auth.users().map(u => `<div class="rep-row">
-          <span><b>${esc(u.name)}</b> <span class="muted-text">${esc(ROLES[u.role] || '')}</span>${u.pin ? ' 🔒' : ''}</span>
+          <span><b>${esc(u.name)}</b> <span class="muted-text">${esc(ROLES[u.role] || '')}</span>${Auth.hasPin(u) ? ' 🔒' : ''}</span>
           <span><button class="mini-btn" data-user-edit="${u.id}">تعديل</button>
           ${Auth.users().length > 1 ? `<button class="del" data-user-del="${u.id}" style="border:none;background:none;cursor:pointer">🗑️</button>` : ''}</span>
         </div>`).join('')}
@@ -1550,6 +1583,11 @@ function modelList(coll) {
   const M = Models[coll];
   const items = filterBySearch(DB.list(coll), M.searchFields);
   let html = searchBar(`ابحث في ${M.plural}...`);
+  if (coll === 'partners' || coll === 'products') {
+    html += `<div class="card-actions" style="margin-top:0">
+      <button data-csv-export="${coll}">⬇️ تصدير CSV</button>
+      <button data-csv-import="${coll}">⬆️ استيراد CSV</button></div>`;
+  }
   if (!items.length) return html + emptyState(M.icon, `لا توجد ${M.plural}`, 'اضغط زر «＋» للإضافة.');
   items.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).forEach(r => {
     const b = M.badge ? M.badge(r) : null;
@@ -2387,22 +2425,28 @@ function openUserDialog(id) {
   document.getElementById('modalForm').innerHTML = `
     <div class="field"><label>الاسم *</label><input name="name" value="${esc(u.name)}" required /></div>
     <div class="field"><label>الدور</label><select name="role">${roleOpts}</select></div>
-    <div class="field"><label>رمز الدخول PIN (اختياري)</label><input name="pin" type="text" inputmode="numeric" value="${esc(u.pin || '')}" placeholder="اتركه فارغاً لدخول بلا رمز" /></div>
+    <div class="field"><label>رمز الدخول PIN (اختياري)</label><input name="pin" type="text" inputmode="numeric" value="" placeholder="${id ? (Auth.hasPin(u) ? 'مضبوط — اكتب جديداً للتغيير أو - لإزالته' : 'اتركه فارغاً لدخول بلا رمز') : 'اتركه فارغاً لدخول بلا رمز'}" /></div>
     <button type="submit" class="btn-primary">حفظ</button>`;
   document.getElementById('modal').classList.remove('hidden');
   document.getElementById('modalForm').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const obj = { name: (fd.get('name') || '').trim(), role: fd.get('role'), pin: (fd.get('pin') || '').trim() };
+    const pinInput = (fd.get('pin') || '').trim();
+    const obj = { name: (fd.get('name') || '').trim(), role: fd.get('role') };
     const users = DB.data.settings.users;
     if (id) {
       const ex = users.find(x => x.id === id);
       // منع إزالة آخر مدير
       if (ex.role === 'admin' && obj.role !== 'admin' && users.filter(x => x.role === 'admin').length === 1) { toast('يجب بقاء مدير واحد على الأقل'); return; }
       Object.assign(ex, obj);
+      delete ex.pin;
+      if (pinInput === '-') delete ex.pinHash;                 // إزالة الرمز
+      else if (pinInput) ex.pinHash = hashPin(pinInput);       // تغيير الرمز
       if (Auth.user && Auth.user.id === id) Auth.user = ex;
     } else {
-      users.push({ id: uid(), ...obj });
+      const nu = { id: uid(), ...obj };
+      if (pinInput && pinInput !== '-') nu.pinHash = hashPin(pinInput);
+      users.push(nu);
     }
     DB.save();
     closeForm();
@@ -2672,6 +2716,10 @@ function bindViewEvents() {
   // كشف الحساب
   on('[data-statement]', 'click', b => printStatement(b.dataset.statement));
 
+  // استيراد/تصدير CSV بالجملة
+  on('[data-csv-export]', 'click', b => exportModelCSV(b.dataset.csvExport));
+  on('[data-csv-import]', 'click', b => importModelCSV(b.dataset.csvImport));
+
   // تصدير التقارير
   on('[data-export]', 'click', b => {
     const k = b.dataset.export;
@@ -2848,7 +2896,7 @@ function showLogin() {
   const tiles = Auth.users().map(u => `<button class="login-tile" data-login="${u.id}">
       <span class="lt-ico">${roleIco[u.role] || '👤'}</span>
       <span class="lt-name">${esc(u.name)}</span>
-      <span class="lt-role">${esc(ROLES[u.role] || '')}${u.pin ? ' 🔒' : ''}</span>
+      <span class="lt-role">${esc(ROLES[u.role] || '')}${Auth.hasPin(u) ? ' 🔒' : ''}</span>
     </button>`).join('');
   document.getElementById('view').innerHTML = `<div class="login-screen">
       <div class="login-brand">MOS&nbsp;<b>ERP</b></div>
@@ -2857,7 +2905,7 @@ function showLogin() {
   document.querySelectorAll('[data-login]').forEach(b => {
     b.onclick = () => {
       const u = Auth.users().find(x => x.id === b.dataset.login);
-      const pin = u.pin ? (prompt('أدخل رمز الدخول (PIN):') || '') : '';
+      const pin = Auth.hasPin(u) ? (prompt('أدخل رمز الدخول (PIN):') || '') : '';
       if (Auth.login(u.id, pin)) App.go('dashboard');
       else toast('رمز الدخول غير صحيح');
     };
@@ -2906,6 +2954,64 @@ function csvCell(v) {
   const s = String(v == null ? '' : v);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
+/* تحليل نص CSV إلى صفوف (يدعم الاقتباس والفواصل داخل الحقول) */
+function parseCSV(text) {
+  const rows = []; let row = [], cell = '', q = false;
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += c;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(x => String(x).trim() !== ''));
+}
+
+/* تصدير منتجات/جهات اتصال إلى CSV */
+function exportModelCSV(coll) {
+  const fields = Models[coll].fields.map(f => f.name);
+  const headers = Models[coll].fields.map(f => f.label.replace(' *', ''));
+  const rows = DB.list(coll).map(r => fields.map(f => r[f] == null ? '' : r[f]));
+  exportCSV(Models[coll].plural, headers, rows);
+}
+
+/* استيراد منتجات/جهات اتصال من CSV (الترتيب حسب حقول النموذج) */
+function importModelCSV(coll) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.csv,text/csv';
+  inp.onchange = () => {
+    const file = inp.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const rows = parseCSV(String(reader.result));
+        if (rows.length < 2) { toast('الملف فارغ أو بلا بيانات'); return; }
+        const fields = Models[coll].fields;
+        let n = 0;
+        for (let i = 1; i < rows.length; i++) {
+          const obj = {};
+          fields.forEach((f, j) => {
+            let v = rows[i][j] != null ? String(rows[i][j]).trim() : '';
+            if (f.type === 'number') v = num(v);
+            obj[f.name] = v;
+          });
+          if (!obj.name) continue;
+          DB.upsert(coll, obj); n++;
+        }
+        toast(`تم استيراد ${n} سجلاً ✅`);
+        App.render();
+      } catch (e) { alert('تعذّر قراءة الملف: ' + e.message); }
+    };
+    reader.readAsText(file);
+  };
+  inp.click();
+}
+
 function exportCSV(name, headers, rows) {
   const lines = [headers.map(csvCell).join(',')];
   rows.forEach(r => lines.push(r.map(csvCell).join(',')));
