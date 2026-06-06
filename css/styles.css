@@ -298,7 +298,49 @@ ul { margin: 6px 0; padding-inline-start: 20px; }
 .je-edit { display: grid; grid-template-columns: 1fr 70px 70px 32px; gap: 6px; margin-bottom: 8px; align-items: center; }
 .je-edit select, .je-edit input { padding: 8px; font-size: .82rem; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
 
+/* ===== الوضع الداكن ===== */
+body.dark {
+  --bg: #15121a;
+  --surface: #211c2a;
+  --text: #ece8f0;
+  --muted: #9b93a6;
+  --border: #332c40;
+  --shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+body.dark .card-actions button,
+body.dark .pl-btn,
+body.dark .drawer-item.active,
+body.dark .acct-table thead th,
+body.dark .acct-table tfoot td,
+body.dark .du-logout { background: #2a2435; }
+body.dark .field input,
+body.dark .field select,
+body.dark .field textarea,
+body.dark .je-edit select, body.dark .je-edit input,
+body.dark .line-edit select, body.dark .line-edit input,
+body.dark .search { background: #1b1722; color: var(--text); }
+body.dark .lines-editor { background: #1b1722; }
+body.dark .acct-table thead th { color: #d9b9cd; }
+body.dark .hbar-track { background: #332c40; }
+body.dark .toast { background: #3a3247; }
+body.dark .warn-card { background: #2c2a18; border-color: #4a431f; color: #e0c97a; }
+body.dark .card-actions button:active { background: #342d42; }
+
 /* ===== نقطة البيع (POS) ===== */
+.pos-scan { display: flex; gap: 8px; margin-bottom: 10px; }
+.pos-scan input {
+  flex: 1; padding: 11px 14px; border: 2px solid var(--accent); border-radius: 12px;
+  font-size: 1rem; font-family: inherit; background: var(--surface); color: var(--text);
+}
+.pos-scan input:focus { outline: none; box-shadow: 0 0 0 3px rgba(0,160,157,.2); }
+.pos-scan .mini-btn { font-size: 1.2rem; }
+
+/* ماسح الكاميرا */
+.cam-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 300; display: flex; align-items: center; justify-content: center; }
+.cam-box { width: 92%; max-width: 420px; text-align: center; }
+.cam-box video { width: 100%; border-radius: 14px; background: #000; }
+.cam-hint { color: #fff; margin: 10px 0; font-size: .9rem; }
 .pos-wrap { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .pos-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; align-content: start; }
 .pos-prod {

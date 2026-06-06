@@ -38,6 +38,7 @@ const DB = {
         currencies: [],          // العملات [{code, symbol, rate}] (BASE = الأساسية)
         users: [],               // المستخدمون [{id, name, role, pin}]
         usersSeeded: false,
+        theme: 'light',          // السمة: فاتح / داكن
       },
     };
   },
@@ -990,7 +991,12 @@ const Views = {
     const custOpts = DB.list('partners').filter(p => p.kind !== 'vendor')
       .map(p => `<option value="${p.id}" ${App.posPartner === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
 
-    return `<input class="search" id="searchInput" type="search" placeholder="ابحث عن منتج..." value="${esc(App.search)}" />
+    return `
+      <div class="pos-scan">
+        <input id="posBarcode" type="text" inputmode="text" placeholder="📷 امسح أو أدخل الباركود ثم Enter" autocomplete="off" />
+        <button id="posCamBtn" class="mini-btn" title="مسح بالكاميرا">📷</button>
+      </div>
+      <input class="search" id="searchInput" type="search" placeholder="ابحث عن منتج بالاسم..." value="${esc(App.search)}" />
       <div class="pos-wrap">
         <div class="pos-grid">${grid}</div>
         <div class="pos-cart">
@@ -1022,7 +1028,11 @@ const Views = {
       const p = DB.get('products', l.productId); return a + num(l.qty) * (p ? num(p.cost) : 0);
     }, 0), 0);
 
-    let html = `<div class="section-title">📊 قائمة الدخل المبسطة</div>`;
+    let html = `<div class="card-actions" style="margin-top:0">
+      <button data-export="report-pdf">🖨️ تصدير PDF</button>
+      <button data-export="report-csv">⬇️ تصدير Excel</button>
+    </div>`;
+    html += `<div class="section-title">📊 قائمة الدخل المبسطة</div>`;
     html += `<div class="card report-table">
       ${reportRow('إجمالي المبيعات', fmtMoney(salesTotal))}
       ${reportRow('تكلفة البضاعة المباعة', '(' + fmtMoney(cogs) + ')')}
@@ -1234,7 +1244,8 @@ const AcctViews = {
     });
     const balanced = Math.abs(totalDr - totalCr) < 0.01;
     if (!rows) return emptyState('⚖️', 'لا توجد أرصدة', 'لم تُرحَّل أي قيود بعد.');
-    return `<div class="card acct-table-wrap"><table class="acct-table">
+    return `<div class="card-actions" style="margin-top:0"><button data-export="trial-csv">⬇️ تصدير Excel</button></div>
+    <div class="card acct-table-wrap"><table class="acct-table">
       <thead><tr><th>الرمز</th><th>الحساب</th><th>مدين</th><th>دائن</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="2">الإجمالي</td><td>${fmtMoney(totalDr)}</td><td>${fmtMoney(totalCr)}</td></tr></tfoot>
@@ -2096,6 +2107,54 @@ function posCheckout(method) {
   if (confirm('طباعة الإيصال؟')) printDoc('sales', printId);
 }
 
+/* البحث عن منتج بالباركود/الرمز وإضافته للسلة */
+function posScan(code) {
+  code = (code || '').trim();
+  if (!code) return false;
+  const p = DB.list('products').find(x =>
+    (x.code && String(x.code).toLowerCase() === code.toLowerCase()) || x.id === code);
+  if (!p) { toast('لا يوجد منتج بالرمز: ' + code); return false; }
+  posAdd(p.id);
+  return true;
+}
+
+/* مسح بالكاميرا باستخدام BarcodeDetector (إن توفّر) */
+let posCamStream = null;
+async function startPosCamera() {
+  if (!('BarcodeDetector' in window)) { toast('المسح بالكاميرا غير مدعوم في هذا المتصفح — استخدم ماسحاً أو الإدخال اليدوي'); return; }
+  try {
+    const detector = new window.BarcodeDetector();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    posCamStream = stream;
+    const overlay = document.createElement('div');
+    overlay.className = 'cam-overlay';
+    overlay.innerHTML = `<div class="cam-box"><video autoplay playsinline></video>
+      <div class="cam-hint">وجّه الكاميرا نحو الباركود</div>
+      <button class="btn-primary" id="camClose">إغلاق</button></div>`;
+    document.body.appendChild(overlay);
+    const video = overlay.querySelector('video');
+    video.srcObject = stream;
+    const stop = () => { stream.getTracks().forEach(t => t.stop()); posCamStream = null; overlay.remove(); };
+    overlay.querySelector('#camClose').onclick = stop;
+    const tick = async () => {
+      if (!posCamStream) return;
+      try {
+        const codes = await detector.detect(video);
+        if (codes && codes.length) {
+          const val = codes[0].rawValue;
+          stop();
+          if (posScan(val)) toast('تمت إضافة المنتج ✅');
+          return;
+        }
+      } catch (e) {}
+      requestAnimationFrame(tick);
+    };
+    video.onloadedmetadata = () => requestAnimationFrame(tick);
+  } catch (e) {
+    toast('تعذّر فتح الكاميرا');
+  }
+}
+
 /* ---------------------------------------------------------------------
    حوارات العملات والمستخدمين (الإعدادات)
    --------------------------------------------------------------------- */
@@ -2209,6 +2268,14 @@ function bindViewEvents() {
   // كشف الحساب
   on('[data-statement]', 'click', b => printStatement(b.dataset.statement));
 
+  // تصدير التقارير
+  on('[data-export]', 'click', b => {
+    const k = b.dataset.export;
+    if (k === 'report-pdf') printReport();
+    else if (k === 'report-csv') exportReportCSV();
+    else if (k === 'trial-csv') exportTrialCSV();
+  });
+
   // الإقفال
   const lockForm = document.getElementById('lockForm');
   if (lockForm) lockForm.onsubmit = (e) => {
@@ -2254,6 +2321,15 @@ function bindViewEvents() {
   if (posCust) posCust.onchange = () => { App.posPartner = posCust.value; };
   const posClear = document.getElementById('posClear');
   if (posClear) posClear.onclick = () => { App.posCart = []; App.render(); };
+  const posBarcode = document.getElementById('posBarcode');
+  if (posBarcode) {
+    posBarcode.onkeydown = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); posScan(posBarcode.value); posBarcode.value = ''; }
+    };
+    posBarcode.focus();
+  }
+  const posCamBtn = document.getElementById('posCamBtn');
+  if (posCamBtn) posCamBtn.onclick = () => startPosCamera();
 
   // إعدادات
   const sf = document.getElementById('settingsForm');
@@ -2370,6 +2446,110 @@ function updateBrand() {
 /* ---------------------------------------------------------------------
    17) النسخ الاحتياطي / الاسترجاع / التصفير
    --------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------
+   السمة (فاتح / داكن)
+   --------------------------------------------------------------------- */
+function applyTheme() {
+  const dark = DB.data.settings.theme === 'dark';
+  document.body.classList.toggle('dark', dark);
+  const btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = dark ? '☀️' : '🌙';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#1b1622' : '#714B67');
+}
+function toggleTheme() {
+  DB.data.settings.theme = DB.data.settings.theme === 'dark' ? 'light' : 'dark';
+  DB.save();
+  applyTheme();
+}
+
+/* ---------------------------------------------------------------------
+   تصدير CSV (يفتح في Excel) — مع BOM لدعم العربية
+   --------------------------------------------------------------------- */
+function csvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function exportCSV(name, headers, rows) {
+  const lines = [headers.map(csvCell).join(',')];
+  rows.forEach(r => lines.push(r.map(csvCell).join(',')));
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${name}-${todayISO()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('تم تصدير ملف Excel (CSV) ✅');
+}
+
+/* طباعة/تصدير PDF للتقارير (عبر نافذة الطباعة) */
+function printReport() {
+  const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
+  const purchases = DB.list('purchases').filter(d => d.status === 'confirmed' || d.status === 'paid');
+  const salesTotal = sales.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
+  const purchTotal = purchases.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
+  const cogs = sales.reduce((s, d) => s + (d.lines || []).reduce((a, l) => {
+    const p = DB.get('products', l.productId); return a + num(l.qty) * (p ? num(p.cost) : 0);
+  }, 0), 0);
+  const s = DB.data.settings;
+  const acctRows = type => DB.list('accounts').filter(a => a.type === type)
+    .map(a => ({ n: a.name, b: Acct.balance(a) })).filter(x => Math.abs(x.b) > 0.005);
+  const sec = (title, items) => `<h3>${title}</h3><table>${items.map(i => `<tr><td>${esc(i.n)}</td><td class="r">${fmtMoney(i.b)}</td></tr>`).join('') || '<tr><td>—</td><td class="r">0</td></tr>'}</table>`;
+  const w = window.open('', '_blank');
+  if (!w) { toast('فعّل النوافذ المنبثقة'); return; }
+  w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>تقرير مالي</title>
+    <style>body{font-family:Tahoma,Arial,sans-serif;padding:24px;color:#222}h1{color:#714B67;margin:0}
+    h3{color:#714B67;margin:18px 0 6px;border-bottom:1px solid #ddd;padding-bottom:4px}
+    table{width:100%;border-collapse:collapse}td{padding:6px 8px;border-bottom:1px solid #eee;font-size:14px}
+    .r{text-align:left}.head{border-bottom:2px solid #714B67;padding-bottom:12px;margin-bottom:8px}
+    .muted{color:#777}.big{font-weight:bold}</style></head><body>
+    <div class="head"><h1>${esc(s.company)}</h1><div class="muted">التقرير المالي — ${esc(todayISO())}</div></div>
+    <h3>قائمة الدخل المبسطة</h3>
+    <table>
+      <tr><td>إجمالي المبيعات</td><td class="r">${fmtMoney(salesTotal)}</td></tr>
+      <tr><td>تكلفة البضاعة المباعة</td><td class="r">(${fmtMoney(cogs)})</td></tr>
+      <tr class="big"><td>مجمل الربح</td><td class="r">${fmtMoney(salesTotal - cogs)}</td></tr>
+      <tr><td>إجمالي المشتريات</td><td class="r">${fmtMoney(purchTotal)}</td></tr>
+      <tr class="big"><td>صافي الربح التقديري</td><td class="r">${fmtMoney(salesTotal - purchTotal)}</td></tr>
+    </table>
+    ${sec('الأصول', acctRows('asset'))}
+    ${sec('الالتزامات', acctRows('liability'))}
+    ${sec('حقوق الملكية', acctRows('equity'))}
+    <script>window.onload=function(){window.print()}<\/script></body></html>`);
+  w.document.close();
+}
+
+/* تصدير ميزان المراجعة Excel */
+function exportTrialCSV() {
+  const rows = [];
+  DB.list('accounts').slice().sort(byCode).forEach(a => {
+    const bal = Acct.balance(a);
+    const debitNormal = !!DEBIT_NORMAL[a.type];
+    let dr = 0, cr = 0;
+    if (debitNormal) { if (bal >= 0) dr = bal; else cr = -bal; }
+    else { if (bal >= 0) cr = bal; else dr = -bal; }
+    if (Math.abs(dr) < 0.005 && Math.abs(cr) < 0.005) return;
+    rows.push([a.code, a.name, ACCOUNT_TYPES[a.type], dr.toFixed(2), cr.toFixed(2)]);
+  });
+  exportCSV('ميزان-المراجعة', ['الرمز', 'الحساب', 'النوع', 'مدين', 'دائن'], rows);
+}
+
+/* تصدير ملخص التقرير Excel */
+function exportReportCSV() {
+  const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
+  const rows = [];
+  const prodMap = {};
+  sales.forEach(d => (d.lines || []).forEach(l => {
+    prodMap[l.productId] = prodMap[l.productId] || { qty: 0, total: 0 };
+    prodMap[l.productId].qty += num(l.qty);
+    prodMap[l.productId].total += toBase(num(l.qty) * num(l.price), d);
+  }));
+  Object.entries(prodMap).sort((a, b) => b[1].total - a[1].total)
+    .forEach(([id, v]) => rows.push([productName(id), fmtQty(v.qty), v.total.toFixed(2)]));
+  exportCSV('أفضل-المنتجات', ['المنتج', 'الكمية المباعة', 'إجمالي المبيعات (' + baseSymbol() + ')'], rows);
+}
+
 function exportData() {
   const blob = new Blob([JSON.stringify(DB.data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -2405,6 +2585,7 @@ function importData() {
           Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
         }
         updateBrand();
+        applyTheme();
         toast('تم استيراد البيانات بنجاح ✅');
         if (Auth.user) App.go('dashboard'); else showLogin();
       } catch (e) {
@@ -2426,6 +2607,7 @@ function resetData() {
   Auth.seed();
   Auth.user = Auth.users().find(u => u.role === 'admin') || Auth.users()[0] || null;
   updateBrand();
+  applyTheme();
   toast('تم تصفير البيانات');
   if (Auth.user) App.go('dashboard'); else showLogin();
 }
@@ -2439,7 +2621,9 @@ function init() {
   seedCurrencies();
   Auth.seed();
   updateBrand();
+  applyTheme();
 
+  document.getElementById('themeBtn').onclick = toggleTheme;
   document.getElementById('menuBtn').onclick = openDrawer;
   document.getElementById('drawerOverlay').onclick = closeDrawer;
   document.getElementById('homeBtn').onclick = () => App.go('apps');
