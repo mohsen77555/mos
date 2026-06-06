@@ -26,13 +26,15 @@ const DB = {
       employees: [],
       accounts: [],   // شجرة الحسابات
       journal: [],    // قيود اليومية (القيد المزدوج)
+      payslips: [],   // مسيّر الرواتب
       settings: {
         company: 'شركتي',
         currency: 'ر.س',
         taxRate: 15,
-        seq: { SO: 0, PO: 0, JE: 0 },
+        seq: { SO: 0, PO: 0, JE: 0, PR: 0 },
         acc: {},                 // ربط الأدوار بالحسابات (cash, ar, ...)
         accountsSeeded: false,
+        lockDate: '',            // تاريخ إقفال الفترة (يمنع التعديل قبله)
       },
     };
   },
@@ -132,6 +134,17 @@ function toast(msg) {
 
 function partnerName(id) { const p = DB.get('partners', id); return p ? p.name : '—'; }
 function productName(id) { const p = DB.get('products', id); return p ? p.name : '—'; }
+function employeeName(id) { const e = DB.get('employees', id); return e ? e.name : '—'; }
+
+/* إقفال الفترة: منع أي عملية بتاريخ ضمن فترة مقفلة */
+function isLocked(date) {
+  const lock = DB.data.settings.lockDate;
+  return lock && date && date <= lock;
+}
+function lockedToast(date) {
+  if (isLocked(date)) { toast('الفترة مقفلة — التاريخ ضمن فترة محاسبية مغلقة'); return true; }
+  return false;
+}
 
 /* ---------------------------------------------------------------------
    3) القوائم الثابتة
@@ -162,6 +175,7 @@ const DEFAULT_ACCOUNTS = [
   { code: '1200', name: 'المخزون', type: 'asset', role: 'inventory' },
   { code: '1300', name: 'ضريبة القيمة المضافة — مدخلات', type: 'asset', role: 'vatIn' },
   { code: '2010', name: 'الموردون (ذمم دائنة)', type: 'liability', role: 'ap' },
+  { code: '2020', name: 'رواتب مستحقة الدفع', type: 'liability', role: 'salaryPayable' },
   { code: '2100', name: 'ضريبة القيمة المضافة — مخرجات', type: 'liability', role: 'vatOut' },
   { code: '3010', name: 'رأس المال', type: 'equity', role: 'capital' },
   { code: '3020', name: 'الأرباح المحتجزة', type: 'equity', role: 'retained' },
@@ -297,6 +311,103 @@ function postPayment(coll, doc, amt, method, paymentId) {
 }
 
 /* ---------------------------------------------------------------------
+   مسيّر الرواتب (Payroll)
+   --------------------------------------------------------------------- */
+function payslipNet(p) { return num(p.basic) + num(p.allowances) - num(p.deductions); }
+
+/* توليد قسائم رواتب لكل الموظفين عن شهر معيّن */
+function runPayroll(month) {
+  let created = 0;
+  DB.list('employees').forEach(e => {
+    if (DB.list('payslips').find(p => p.employeeId === e.id && p.month === month)) return;
+    DB.upsert('payslips', {
+      ref: DB.nextRef('PR'),
+      employeeId: e.id, month,
+      basic: num(e.salary), allowances: 0, deductions: 0,
+      status: 'draft', date: month + '-28',
+    });
+    created++;
+  });
+  return created;
+}
+
+/* اعتماد القسيمة: إثبات استحقاق الراتب */
+function postPayslip(id) {
+  const p = DB.get('payslips', id);
+  if (!p || p.status !== 'draft') return;
+  if (lockedToast(p.date)) return;
+  const net = payslipNet(p);
+  if (net <= 0) { toast('صافي الراتب صفر'); return; }
+  Acct.post({
+    date: p.date, ref: p.ref,
+    narration: 'استحقاق راتب ' + employeeName(p.employeeId) + ' — ' + p.month,
+    source: 'payroll', sourceId: id, docId: id,
+    lines: [
+      { accountId: Acct.id('salaries'), debit: net, credit: 0 },
+      { accountId: Acct.id('salaryPayable'), debit: 0, credit: net },
+    ],
+  });
+  p.status = 'posted';
+  DB.upsert('payslips', p);
+  toast('تم اعتماد القسيمة وإثبات الاستحقاق ✅');
+}
+
+/* صرف الراتب */
+function payPayslip(id, method) {
+  const p = DB.get('payslips', id);
+  if (!p || p.status !== 'posted') return;
+  if (lockedToast(todayISO())) return;
+  const net = payslipNet(p);
+  const cashRole = method === 'cash' ? 'cash' : 'bank';
+  Acct.post({
+    date: todayISO(), ref: p.ref,
+    narration: 'صرف راتب ' + employeeName(p.employeeId) + ' — ' + p.month,
+    source: 'payroll', sourceId: id, docId: id,
+    lines: [
+      { accountId: Acct.id('salaryPayable'), debit: net, credit: 0 },
+      { accountId: Acct.id(cashRole), debit: 0, credit: net },
+    ],
+  });
+  p.status = 'paid'; p.payMethod = method;
+  DB.upsert('payslips', p);
+  toast('تم صرف الراتب ✅');
+}
+
+/* حذف قسيمة (يعكس قيودها) */
+function deletePayslip(id) {
+  Acct.removeByDoc(id);
+  DB.remove('payslips', id);
+}
+
+/* ---------------------------------------------------------------------
+   إقفال الفترة المالية (قيد الإقفال + قفل التواريخ)
+   --------------------------------------------------------------------- */
+function closePeriod(date) {
+  if (!date) { toast('اختر تاريخ الإقفال'); return false; }
+  if (lockedToast(date)) return false;
+  const lines = [];
+  DB.list('accounts').filter(a => a.type === 'income').forEach(a => {
+    const b = Acct.balance(a);
+    if (Math.abs(b) > 0.005) lines.push({ accountId: a.id, debit: b > 0 ? b : 0, credit: b < 0 ? -b : 0 });
+  });
+  DB.list('accounts').filter(a => a.type === 'expense').forEach(a => {
+    const b = Acct.balance(a);
+    if (Math.abs(b) > 0.005) lines.push({ accountId: a.id, debit: b < 0 ? -b : 0, credit: b > 0 ? b : 0 });
+  });
+  const net = Acct.sumType('income') - Acct.sumType('expense');
+  if (Math.abs(net) > 0.005) {
+    lines.push({ accountId: Acct.id('retained'), debit: net < 0 ? -net : 0, credit: net > 0 ? net : 0 });
+  }
+  if (lines.length) {
+    Acct.post({ date, narration: 'قيد إقفال الفترة المالية حتى ' + date, source: 'closing', lines });
+  }
+  DB.data.settings.lockDate = date;
+  DB.save();
+  toast('تم الإقفال وترحيل النتيجة للأرباح المحتجزة ✅');
+  return true;
+}
+
+/* ---------------------------------------------------------------------
    4) تعريف النماذج (Models) — قيادة بالبيانات على طريقة Odoo
    --------------------------------------------------------------------- */
 const Models = {
@@ -306,6 +417,7 @@ const Models = {
     subtitle: r => [PARTNER_KIND[r.kind] || '', r.phone || '', r.city || ''].filter(Boolean).join(' • '),
     badge: r => ({ text: PARTNER_KIND[r.kind] || '—', cls: r.kind === 'vendor' ? 'info' : 'ok' }),
     searchFields: ['name', 'phone', 'email', 'city', 'vat'],
+    rowActions: r => `<button data-statement="${r.id}">📄 كشف حساب</button>`,
     fields: [
       { name: 'name', label: 'الاسم *', type: 'text', required: true },
       { name: 'kind', label: 'النوع', type: 'select', options: kv(PARTNER_KIND), default: 'customer' },
@@ -385,6 +497,7 @@ const APPS = [
   { route: 'invoicing', label: 'الفوترة والمدفوعات', icon: '💳', color: '#20c997' },
   { route: 'accounting', label: 'المحاسبة', icon: '🧮', color: '#dc3545' },
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
+  { route: 'payroll', label: 'الرواتب', icon: '💵', color: '#e83e8c' },
   { route: 'reports', label: 'التقارير', icon: '📈', color: '#6f42c1' },
   { route: 'settings', label: 'الإعدادات', icon: '⚙️', color: '#6c757d' },
 ];
@@ -397,6 +510,7 @@ const App = {
   search: '',
   acctTab: 'accounts',   // التبويب النشط داخل المحاسبة
   ledgerAcc: '',         // الحساب المختار في دفتر الأستاذ
+  payMonth: '',          // الشهر المختار في الرواتب
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1 },
@@ -445,6 +559,7 @@ function confirmDoc(coll, id) {
   const doc = DB.get(coll, id);
   if (!doc || doc.status !== 'draft') return;
   if (!(doc.lines || []).length) { toast('أضِف بنوداً أولاً'); return; }
+  if (lockedToast(doc.date || todayISO())) return;
   const isSale = coll === 'sales';
   const sign = isSale ? -1 : +1;            // البيع يُنقص المخزون، الشراء يزيده
   (doc.lines || []).forEach(l => {
@@ -473,6 +588,7 @@ function confirmDoc(coll, id) {
 function cancelDoc(coll, id) {
   const doc = DB.get(coll, id);
   if (!doc || doc.status === 'cancel') return;
+  if (lockedToast(doc.date || todayISO())) return;
   if (doc.status === 'confirmed' || doc.status === 'paid') {
     const isSale = coll === 'sales';
     const sign = isSale ? +1 : -1;          // عكس الترحيل
@@ -497,6 +613,7 @@ function cancelDoc(coll, id) {
 function registerPayment(coll, id, amount, method) {
   const doc = DB.get(coll, id);
   if (!doc) return;
+  if (lockedToast(todayISO())) return;
   const t = docTotals(doc);
   const amt = Math.min(num(amount), t.due);
   if (amt <= 0) { toast('لا يوجد مبلغ مستحق'); return; }
@@ -679,11 +796,56 @@ const Views = {
   accounting() {
     const tabs = [
       ['accounts', 'شجرة الحسابات'], ['journal', 'القيود'], ['trial', 'ميزان المراجعة'],
-      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'],
+      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'], ['close', 'الإقفال'],
     ];
     let html = `<div class="acct-tabs">` + tabs.map(([k, l]) =>
       `<button class="acct-tab ${App.acctTab === k ? 'active' : ''}" data-actab="${k}">${l}</button>`).join('') + `</div>`;
     html += (AcctViews[App.acctTab] || AcctViews.accounts)();
+    return html;
+  },
+
+  /* ===== الرواتب ===== */
+  payroll() {
+    if (!App.payMonth) App.payMonth = todayISO().slice(0, 7);
+    const month = App.payMonth;
+    if (!DB.list('employees').length)
+      return emptyState('💵', 'لا يوجد موظفون', 'أضِف موظفين من تطبيق «الموظفون» أولاً.');
+
+    let html = `<div class="card">
+      <div class="field" style="margin-bottom:8px"><label>شهر الرواتب</label>
+        <input id="payMonthInput" type="month" value="${esc(month)}" /></div>
+      <button class="btn-primary" id="runPayrollBtn">▶️ تشغيل رواتب ${esc(month)}</button>
+    </div>`;
+
+    const slips = DB.list('payslips').filter(p => p.month === month)
+      .sort((a, b) => employeeName(a.employeeId).localeCompare(employeeName(b.employeeId)));
+
+    const totalNet = slips.reduce((s, p) => s + payslipNet(p), 0);
+    const paidCount = slips.filter(p => p.status === 'paid').length;
+
+    if (!slips.length) return html + emptyState('🧾', 'لا توجد قسائم لهذا الشهر', 'اضغط «تشغيل الرواتب» لتوليدها.');
+
+    html += `<div class="stat-grid">
+      <div class="stat-card" style="--c:#e83e8c"><span class="ico">💵</span><div class="num">${fmtMoney(totalNet)}</div><div class="lbl">إجمالي صافي الرواتب</div></div>
+      <div class="stat-card" style="--c:#198754"><span class="ico">✅</span><div class="num">${paidCount}/${slips.length}</div><div class="lbl">المصروفة</div></div>
+    </div>`;
+
+    slips.forEach(p => {
+      const st = { draft: 'muted', posted: 'info', paid: 'ok' }[p.status] || 'muted';
+      const stLbl = { draft: 'مسودة', posted: 'معتمدة', paid: 'مصروفة' }[p.status] || p.status;
+      let actions = '';
+      if (p.status === 'draft') actions = `<button data-pslip-post="${p.id}">✅ اعتماد</button><button data-pslip-edit="${p.id}">✏️ تعديل</button><button class="del" data-pslip-del="${p.id}">🗑️</button>`;
+      else if (p.status === 'posted') actions = `<button data-pslip-pay="${p.id}">💵 صرف</button><button data-pslip-print="${p.id}">🖨️ قسيمة</button>`;
+      else actions = `<button data-pslip-print="${p.id}">🖨️ قسيمة</button>`;
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(employeeName(p.employeeId))}</div>
+          <div class="meta">أساسي: ${fmtMoney(p.basic)} • بدلات: ${fmtMoney(p.allowances)} • استقطاع: ${fmtMoney(p.deductions)}</div>
+        </div><div style="text-align:left">
+          <span class="badge ${st}">${stLbl}</span>
+          <div class="title" style="margin-top:6px">${fmtMoney(payslipNet(p))}</div>
+        </div></div>
+        <div class="card-actions">${actions}</div></div>`;
+    });
     return html;
   },
 
@@ -743,7 +905,7 @@ const Views = {
   /* ===== الإعدادات ===== */
   settings() {
     const s = DB.data.settings;
-    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', employees: 'الموظفون', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
+    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
     const counts = Object.keys(labels)
       .map(c => `<li>${esc(labels[c])}: <b>${DB.list(c).length}</b></li>`).join('');
     return `
@@ -940,6 +1102,40 @@ const AcctViews = {
       <div class="card warn-card" style="${balanced ? 'background:#e9f7ef;border-color:#bfe3cd;color:#1e7e4d' : ''}">
         ${balanced ? '✅ الميزانية متوازنة.' : '⚠️ غير متوازنة — تحقق من الأرصدة الافتتاحية والقيود اليدوية.'}</div>`;
   },
+
+  /* إقفال الفترة المالية */
+  close() {
+    const lock = DB.data.settings.lockDate;
+    const net = Acct.netProfit();
+    return `
+      <div class="section-title">🔒 قفل الفترة</div>
+      <div class="card">
+        <div class="meta">يمنع القفل أي تعديل (تأكيد/إلغاء/دفع/قيد) بتاريخ يسبق أو يساوي التاريخ المحدد.</div>
+        <div class="rep-row strong" style="margin-top:8px"><span>تاريخ الإقفال الحالي</span>
+          <span>${lock ? esc(lock) : 'غير مقفل'}</span></div>
+        <form id="lockForm">
+          <div class="field" style="margin-top:12px"><label>قفل حتى تاريخ</label>
+            <input name="lockDate" type="date" value="${esc(lock || '')}" /></div>
+          <div class="card-actions" style="margin-top:0">
+            <button type="submit" class="mini-btn">🔒 تطبيق القفل</button>
+            ${lock ? `<button type="button" class="del" id="unlockBtn">🔓 فتح القفل</button>` : ''}
+          </div>
+        </form>
+      </div>
+
+      <div class="section-title">📕 قيد الإقفال السنوي</div>
+      <div class="card">
+        <div class="meta">يصفّر حسابات الإيرادات والمصروفات ويرحّل النتيجة إلى «الأرباح المحتجزة»، ثم يقفل الفترة حتى التاريخ المحدد.</div>
+        <div class="rep-row strong" style="margin-top:8px">
+          <span>${net >= 0 ? 'صافي ربح الفترة' : 'صافي خسارة الفترة'}</span>
+          <span>${fmtMoney(Math.abs(net))}</span></div>
+        <form id="closeForm">
+          <div class="field" style="margin-top:12px"><label>تاريخ الإقفال</label>
+            <input name="closeDate" type="date" value="${todayISO()}" required /></div>
+          <button type="submit" class="btn-primary">تنفيذ قيد الإقفال وقفل الفترة</button>
+        </form>
+      </div>`;
+  },
 };
 
 /* ---------------------------------------------------------------------
@@ -957,6 +1153,7 @@ function modelList(coll) {
         <div class="meta">${esc(M.subtitle(r))}</div>
       </div>${b ? `<span class="badge ${b.cls}">${esc(b.text)}</span>` : ''}</div>
       <div class="card-actions">
+        ${M.rowActions ? M.rowActions(r) : ''}
         <button data-edit="${coll}:${r.id}">✏️ تعديل</button>
         <button class="del" data-del="${coll}:${r.id}">🗑️ حذف</button>
       </div></div>`;
@@ -1259,6 +1456,15 @@ function submitForm(e) {
   for (const [k, v] of fd.entries()) obj[k] = typeof v === 'string' ? v.trim() : v;
   if (id) obj.id = id;
 
+  if (kind === 'payslip') {
+    ['basic', 'allowances', 'deductions'].forEach(k => { obj[k] = num(obj[k]); });
+    DB.upsert('payslips', obj);
+    closeForm();
+    toast('تم حفظ القسيمة ✅');
+    App.render();
+    return;
+  }
+
   if (kind === 'doc') {
     obj.lines = lineDraft
       .filter(l => l.productId && num(l.qty) > 0)
@@ -1433,6 +1639,7 @@ function submitJournal(e) {
     toast('القيد غير متوازن أو ناقص');
     return;
   }
+  if (lockedToast(fd.get('date'))) return;
   if (jeEditId) {
     DB.upsert('journal', { id: jeEditId, date: fd.get('date'), narration: (fd.get('narration') || '').trim(), lines, source: 'manual' });
   } else {
@@ -1490,6 +1697,112 @@ function printDoc(coll, id) {
   w.document.close();
 }
 
+/* تعديل قسيمة راتب */
+function openPayslipForm(id) {
+  const p = DB.get('payslips', id);
+  if (!p) return;
+  if (p.status !== 'draft') { toast('لا يمكن تعديل قسيمة معتمدة'); return; }
+  currentForm = { coll: 'payslips', id, kind: 'payslip' };
+  document.getElementById('modalTitle').textContent = 'تعديل قسيمة — ' + employeeName(p.employeeId);
+  document.getElementById('modalForm').innerHTML =
+    `<div class="meta" style="margin-bottom:12px">الموظف: <b>${esc(employeeName(p.employeeId))}</b> • الشهر: <b>${esc(p.month)}</b></div>` +
+    fieldHTML({ name: 'basic', label: 'الراتب الأساسي', type: 'number', default: 0 }, p) +
+    fieldHTML({ name: 'allowances', label: 'البدلات', type: 'number', default: 0 }, p) +
+    fieldHTML({ name: 'deductions', label: 'الاستقطاعات', type: 'number', default: 0 }, p) +
+    `<button type="submit" class="btn-primary">حفظ القسيمة</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+}
+
+/* صرف قسيمة راتب — اختيار الطريقة */
+function openPayslipPayDialog(id) {
+  const p = DB.get('payslips', id);
+  if (!p) return;
+  document.getElementById('modalTitle').textContent = 'صرف راتب — ' + employeeName(p.employeeId);
+  document.getElementById('modalForm').innerHTML = `
+    <div class="card report-table" style="margin:0 0 12px">${reportRow('صافي الراتب', fmtMoney(payslipNet(p)), true)}</div>
+    <div class="field"><label>طريقة الصرف</label><select name="method">
+      <option value="cash">نقدي</option><option value="bank">تحويل بنكي</option></select></div>
+    <button type="submit" class="btn-primary">تأكيد الصرف</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    payPayslip(id, new FormData(e.target).get('method'));
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    App.render();
+  };
+}
+
+/* طباعة قسيمة راتب */
+function printPayslip(id) {
+  const p = DB.get('payslips', id);
+  if (!p) return;
+  const s = DB.data.settings;
+  const w = window.open('', '_blank');
+  if (!w) { toast('فعّل النوافذ المنبثقة للطباعة'); return; }
+  w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>${esc(p.ref)}</title>
+    <style>body{font-family:Tahoma,Arial,sans-serif;padding:24px;color:#222}h1{color:#714B67;margin:0}
+    .head{border-bottom:2px solid #714B67;padding-bottom:12px;margin-bottom:16px;display:flex;justify-content:space-between}
+    table{width:100%;border-collapse:collapse;margin-top:12px}td{border:1px solid #ddd;padding:9px;font-size:14px}
+    .r{text-align:left}.tot{font-weight:bold;background:#f3eef2}.muted{color:#777}</style></head><body>
+    <div class="head"><div><h1>${esc(s.company)}</h1><div class="muted">قسيمة راتب</div></div>
+    <div style="text-align:left"><b>${esc(p.ref)}</b><div class="muted">شهر ${esc(p.month)}</div></div></div>
+    <div><b>الموظف:</b> ${esc(employeeName(p.employeeId))}</div>
+    <table>
+      <tr><td>الراتب الأساسي</td><td class="r">${fmtMoney(p.basic)}</td></tr>
+      <tr><td>البدلات</td><td class="r">${fmtMoney(p.allowances)}</td></tr>
+      <tr><td>الاستقطاعات</td><td class="r">(${fmtMoney(p.deductions)})</td></tr>
+      <tr class="tot"><td>صافي الراتب</td><td class="r">${fmtMoney(payslipNet(p))}</td></tr>
+    </table>
+    <p class="muted" style="margin-top:30px">التوقيع: ............................</p>
+    <script>window.onload=function(){window.print()}<\/script></body></html>`);
+  w.document.close();
+}
+
+/* كشف حساب جهة اتصال (قابل للطباعة) */
+function buildStatement(partnerId) {
+  const rows = [];
+  DB.list('sales').filter(d => d.partnerId === partnerId && d.status !== 'draft' && d.status !== 'cancel')
+    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مبيعات', debit: docTotals(d).total, credit: 0 }));
+  DB.list('purchases').filter(d => d.partnerId === partnerId && d.status !== 'draft' && d.status !== 'cancel')
+    .forEach(d => rows.push({ date: d.date, ref: d.ref, desc: 'فاتورة مشتريات', debit: 0, credit: docTotals(d).total }));
+  DB.list('payments').filter(pm => pm.partnerId === partnerId).forEach(pm => {
+    if (pm.kind === 'in') rows.push({ date: pm.date, ref: pm.ref, desc: 'تحصيل (' + (PAY_METHOD[pm.method] || '') + ')', debit: 0, credit: num(pm.amount) });
+    else rows.push({ date: pm.date, ref: pm.ref, desc: 'سداد (' + (PAY_METHOD[pm.method] || '') + ')', debit: num(pm.amount), credit: 0 });
+  });
+  rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  let bal = 0;
+  rows.forEach(r => { bal += num(r.debit) - num(r.credit); r.balance = bal; });
+  return { rows, balance: bal };
+}
+
+function printStatement(partnerId) {
+  const p = DB.get('partners', partnerId);
+  if (!p) return;
+  const s = DB.data.settings;
+  const { rows, balance } = buildStatement(partnerId);
+  const w = window.open('', '_blank');
+  if (!w) { toast('فعّل النوافذ المنبثقة للطباعة'); return; }
+  const body = rows.length ? rows.map(r => `<tr>
+    <td>${fmtDate(r.date)}</td><td>${esc(r.ref || '')}</td><td>${esc(r.desc)}</td>
+    <td>${r.debit ? fmtMoney(r.debit) : '—'}</td><td>${r.credit ? fmtMoney(r.credit) : '—'}</td>
+    <td>${fmtMoney(r.balance)}</td></tr>`).join('') : '<tr><td colspan="6" style="text-align:center">لا توجد حركات</td></tr>';
+  const sign = balance > 0 ? 'مدين لنا (له علينا تحصيله)' : (balance < 0 ? 'دائن (مستحق له علينا)' : 'مُسوّى');
+  w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8"><title>كشف حساب ${esc(p.name)}</title>
+    <style>body{font-family:Tahoma,Arial,sans-serif;padding:24px;color:#222}h1{color:#714B67;margin:0}
+    .head{border-bottom:2px solid #714B67;padding-bottom:12px;margin-bottom:16px;display:flex;justify-content:space-between}
+    table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}th,td{border:1px solid #ddd;padding:8px;text-align:right}
+    th{background:#f3eef2}.muted{color:#777}.tot{margin-top:14px;font-weight:bold;font-size:16px;text-align:left}</style></head><body>
+    <div class="head"><div><h1>${esc(s.company)}</h1><div class="muted">كشف حساب</div></div>
+    <div style="text-align:left"><b>${esc(p.name)}</b><div class="muted">${esc(PARTNER_KIND[p.kind] || '')}${p.phone ? ' • ' + esc(p.phone) : ''}</div>
+    <div class="muted">${esc(todayISO())}</div></div></div>
+    <table><thead><tr><th>التاريخ</th><th>المرجع</th><th>البيان</th><th>مدين</th><th>دائن</th><th>الرصيد</th></tr></thead>
+    <tbody>${body}</tbody></table>
+    <div class="tot">الرصيد النهائي: ${fmtMoney(Math.abs(balance))} — ${sign}</div>
+    <script>window.onload=function(){window.print()}<\/script></body></html>`);
+  w.document.close();
+}
+
 /* ---------------------------------------------------------------------
    15) ربط أحداث العرض
    --------------------------------------------------------------------- */
@@ -1537,6 +1850,44 @@ function bindViewEvents() {
   on('[data-je-edit]', 'click', b => openJournalDialog(b.dataset.jeEdit));
   on('[data-je-del]', 'click', b => {
     if (confirm('حذف هذا القيد نهائياً؟')) { DB.remove('journal', b.dataset.jeDel); toast('تم الحذف'); App.render(); }
+  });
+
+  // كشف الحساب
+  on('[data-statement]', 'click', b => printStatement(b.dataset.statement));
+
+  // الإقفال
+  const lockForm = document.getElementById('lockForm');
+  if (lockForm) lockForm.onsubmit = (e) => {
+    e.preventDefault();
+    DB.data.settings.lockDate = new FormData(e.target).get('lockDate') || '';
+    DB.save(); toast('تم تحديث القفل ✅'); App.render();
+  };
+  const unlockBtn = document.getElementById('unlockBtn');
+  if (unlockBtn) unlockBtn.onclick = () => {
+    if (confirm('فتح قفل الفترة؟')) { DB.data.settings.lockDate = ''; DB.save(); toast('تم فتح القفل'); App.render(); }
+  };
+  const closeForm2 = document.getElementById('closeForm');
+  if (closeForm2) closeForm2.onsubmit = (e) => {
+    e.preventDefault();
+    const date = new FormData(e.target).get('closeDate');
+    if (confirm('تنفيذ قيد الإقفال وقفل الفترة حتى ' + date + '؟')) { closePeriod(date); App.render(); }
+  };
+
+  // الرواتب
+  const payMonthInput = document.getElementById('payMonthInput');
+  if (payMonthInput) payMonthInput.onchange = () => { App.payMonth = payMonthInput.value; App.render(); };
+  const runBtn = document.getElementById('runPayrollBtn');
+  if (runBtn) runBtn.onclick = () => {
+    const n = runPayroll(App.payMonth);
+    toast(n ? `تم توليد ${n} قسيمة` : 'كل القسائم موجودة مسبقاً');
+    App.render();
+  };
+  on('[data-pslip-post]', 'click', b => { postPayslip(b.dataset.pslipPost); App.render(); });
+  on('[data-pslip-pay]', 'click', b => openPayslipPayDialog(b.dataset.pslipPay));
+  on('[data-pslip-edit]', 'click', b => openPayslipForm(b.dataset.pslipEdit));
+  on('[data-pslip-print]', 'click', b => printPayslip(b.dataset.pslipPrint));
+  on('[data-pslip-del]', 'click', b => {
+    if (confirm('حذف القسيمة؟')) { deletePayslip(b.dataset.pslipDel); toast('تم الحذف'); App.render(); }
   });
 
   // إعدادات
