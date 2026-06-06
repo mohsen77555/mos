@@ -30,12 +30,14 @@ const DB = {
       leads: [],      // CRM — الفرص البيعية
       boms: [],       // قوائم مكوّنات التصنيع
       mos: [],        // أوامر التصنيع
+      returns: [],    // المرتجعات (إشعارات دائن/مدين)
+      vouchers: [],   // سندات القبض/الصرف والتحويلات
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
         vatNo: '',              // الرقم الضريبي (للفاتورة الإلكترونية)
         taxRate: 15,
-        seq: { SO: 0, PO: 0, JE: 0, PR: 0, MO: 0 },
+        seq: { SO: 0, PO: 0, JE: 0, PR: 0, MO: 0, RT: 0, CV: 0 },
         acc: {},                 // ربط الأدوار بالحسابات (cash, ar, ...)
         accountsSeeded: false,
         lockDate: '',            // تاريخ إقفال الفترة (يمنع التعديل قبله)
@@ -701,6 +703,8 @@ const App = {
   posPartner: '',        // العميل المختار في نقطة البيع
   repFrom: '',           // مدى تواريخ التقارير: من
   repTo: '',             // مدى تواريخ التقارير: إلى
+  vatFrom: '',           // مدى تقرير الضريبة
+  vatTo: '',
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1 },
@@ -815,6 +819,60 @@ function cancelDoc(coll, id) {
   doc.status = 'cancel';
   DB.upsert(coll, doc);
   toast('تم إلغاء المستند وعكس القيود');
+}
+
+/* إنشاء مرتجع كامل لمستند مؤكد/مدفوع (إشعار دائن للمبيعات / مدين للمشتريات) */
+function createReturn(coll, id) {
+  const doc = DB.get(coll, id);
+  if (!doc || (doc.status !== 'confirmed' && doc.status !== 'paid')) return;
+  if (doc.returned) { toast('سبق إرجاع هذا المستند'); return; }
+  const date = todayISO();
+  if (lockedToast(date)) return;
+  const isSale = coll === 'sales';
+  const t = docTotals(doc);
+  const ret = DB.upsert('returns', {
+    ref: DB.nextRef('RT'), srcColl: coll, srcId: id, partnerId: doc.partnerId, date,
+    kind: isSale ? 'sale' : 'purchase', currency: docCurCode(doc), rate: docRate(doc),
+    total: t.total, lines: (doc.lines || []).map(l => ({ ...l })),
+  });
+  // عكس المخزون
+  const sign = isSale ? +1 : -1;       // مرتجع بيع يزيد المخزون، مرتجع شراء ينقصه
+  let cogs = 0;
+  (doc.lines || []).forEach(l => {
+    const p = DB.get('products', l.productId);
+    if (p && p.type !== 'service') {
+      cogs += num(l.qty) * num(p.cost);
+      p.qty = num(p.qty) + sign * num(l.qty);
+      DB.upsert('products', p);
+      DB.upsert('moves', { date, productId: l.productId, qty: sign * num(l.qty), type: isSale ? 'in' : 'out', ref: ret.ref, doc: 'return', docId: ret.id });
+    }
+  });
+  // قيد عكسي
+  const lines = [];
+  if (isSale) {
+    lines.push({ accountId: Acct.id('sales'), debit: toBase(t.subtotal, doc), credit: 0 });
+    if (t.tax) lines.push({ accountId: Acct.id('vatOut'), debit: toBase(t.tax, doc), credit: 0 });
+    lines.push({ accountId: Acct.id('ar'), debit: 0, credit: toBase(t.total, doc) });
+    if (cogs > 0) {
+      lines.push({ accountId: Acct.id('inventory'), debit: +cogs.toFixed(2), credit: 0 });
+      lines.push({ accountId: Acct.id('cogs'), debit: 0, credit: +cogs.toFixed(2) });
+    }
+  } else {
+    let stockSub = 0, svcSub = 0;
+    (doc.lines || []).forEach(l => {
+      const p = DB.get('products', l.productId);
+      const amt = toBase(num(l.qty) * num(l.price), doc);
+      if (p && p.type !== 'service') stockSub += amt; else svcSub += amt;
+    });
+    lines.push({ accountId: Acct.id('ap'), debit: toBase(t.total, doc), credit: 0 });
+    if (stockSub > 0) lines.push({ accountId: Acct.id('inventory'), debit: 0, credit: +stockSub.toFixed(2) });
+    if (svcSub > 0) lines.push({ accountId: Acct.id('purchases'), debit: 0, credit: +svcSub.toFixed(2) });
+    if (t.tax) lines.push({ accountId: Acct.id('vatIn'), debit: 0, credit: toBase(t.tax, doc) });
+  }
+  Acct.post({ date, ref: ret.ref, narration: (isSale ? 'مرتجع مبيعات ' : 'مرتجع مشتريات ') + doc.ref, source: 'return', sourceId: ret.id, docId: ret.id, lines });
+  doc.returned = true; doc.returnRef = ret.ref;
+  DB.upsert(coll, doc);
+  toast('تم إنشاء المرتجع وعكس أثره ✅');
 }
 
 /* تسجيل دفعة على مستند (payRate = سعر الصرف يوم الدفع، اختياري) */
@@ -1010,7 +1068,7 @@ const Views = {
   accounting() {
     const tabs = [
       ['accounts', 'شجرة الحسابات'], ['journal', 'القيود'], ['trial', 'ميزان المراجعة'],
-      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'], ['close', 'الإقفال'],
+      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'], ['vat', 'ضريبة VAT'], ['close', 'الإقفال'],
     ];
     let html = `<div class="acct-tabs">` + tabs.map(([k, l]) =>
       `<button class="acct-tab ${App.acctTab === k ? 'active' : ''}" data-actab="${k}">${l}</button>`).join('') + `</div>`;
@@ -1541,6 +1599,35 @@ const AcctViews = {
         ${balanced ? '✅ الميزانية متوازنة.' : '⚠️ غير متوازنة — تحقق من الأرصدة الافتتاحية والقيود اليدوية.'}</div>`;
   },
 
+  /* تقرير ضريبة القيمة المضافة (إقرار VAT) */
+  vat() {
+    const from = App.vatFrom, to = App.vatTo;
+    const out = accountRangeBalance(DB.get('accounts', Acct.id('vatOut')), from, to);  // ضريبة المخرجات (مستحقة)
+    const inp = accountRangeBalance(DB.get('accounts', Acct.id('vatIn')), from, to);    // ضريبة المدخلات (قابلة للخصم)
+    const net = out - inp;
+    return `
+      <div class="card">
+        <div class="date-range">
+          <div class="field" style="margin:0"><label>من تاريخ</label><input id="vatFrom" type="date" value="${esc(from)}" /></div>
+          <div class="field" style="margin:0"><label>إلى تاريخ</label><input id="vatTo" type="date" value="${esc(to)}" /></div>
+        </div>
+        <div class="card-actions" style="margin-top:8px">
+          <button data-vat-preset="month">هذا الشهر</button>
+          <button data-vat-preset="quarter">هذا الربع</button>
+          <button data-vat-preset="year">هذا العام</button>
+        </div>
+      </div>
+      <div class="section-title">📋 إقرار ضريبة القيمة المضافة</div>
+      <div class="card report-table">
+        ${reportRow('ضريبة المخرجات (على المبيعات)', fmtMoney(out))}
+        ${reportRow('ضريبة المدخلات (على المشتريات)', '(' + fmtMoney(inp) + ')')}
+        ${reportRow(net >= 0 ? 'صافي الضريبة المستحقة للدفع' : 'صافي ضريبة قابلة للاسترداد', fmtMoney(Math.abs(net)), true)}
+      </div>
+      <div class="card warn-card" style="${net >= 0 ? '' : 'background:#e9f7ef;border-color:#bfe3cd;color:#1e7e4d'}">
+        ${net >= 0 ? `💰 يجب سداد <b>${fmtMoney(net)}</b> للجهة الضريبية عن هذه الفترة.` : `↩️ لديك رصيد ضريبي قابل للاسترداد بقيمة <b>${fmtMoney(-net)}</b>.`}
+      </div>`;
+  },
+
   /* إقفال الفترة المالية */
   close() {
     const lock = DB.data.settings.lockDate;
@@ -1635,6 +1722,7 @@ function docCard(coll, d) {
   } else if (d.status === 'confirmed' || d.status === 'paid') {
     if (t.due > 0.001) actions += `<button data-pay="${coll}:${d.id}">💵 تسجيل دفعة</button>`;
     actions += `<button data-print="${coll}:${d.id}">🖨️ طباعة</button>`;
+    if (!d.returned) actions += `<button data-return="${coll}:${d.id}">↩️ مرتجع</button>`;
     if (d.status !== 'paid') actions += `<button class="del" data-cancel="${coll}:${d.id}">✖️ إلغاء</button>`;
   } else {
     actions = `<button class="del" data-del="${coll}:${d.id}">🗑️ حذف</button>`;
@@ -1644,6 +1732,7 @@ function docCard(coll, d) {
       <div class="meta">${partyLabel} • ${fmtDate(d.date)} • ${(d.lines || []).length} بند</div>
     </div><div style="text-align:left">
       <span class="badge ${st}">${esc(DOC_STATUS[d.status] || d.status)}</span>
+      ${d.returned ? '<span class="badge danger">مُرتجع</span>' : ''}
       <div class="title" style="margin-top:6px">${fmtDoc(t.total, d)}</div>
       ${t.due > 0.001 && d.status !== 'draft' && d.status !== 'cancel' ? `<div class="meta">المتبقي: <b>${fmtDoc(t.due, d)}</b></div>` : ''}
     </div></div>
@@ -2690,6 +2779,10 @@ function bindViewEvents() {
     if (confirm('إلغاء المستند سيعكس حركات المخزون. متابعة؟')) { cancelDoc(c, i); App.render(); }
   });
   on('[data-pay]', 'click', b => { const [c, i] = b.dataset.pay.split(':'); openPayDialog(c, i); });
+  on('[data-return]', 'click', b => {
+    const [c, i] = b.dataset.return.split(':');
+    if (confirm('إنشاء مرتجع كامل لهذا المستند؟ سيُعكس أثره على المخزون والمحاسبة.')) { createReturn(c, i); App.render(); }
+  });
   on('[data-print]', 'click', b => { const [c, i] = b.dataset.print.split(':'); printDoc(c, i); });
 
   on('[data-adjust]', 'click', b => openAdjustDialog(b.dataset.adjust));
@@ -2708,6 +2801,19 @@ function bindViewEvents() {
   on('[data-actab]', 'click', b => { App.acctTab = b.dataset.actab; App.render(); updateFab(); });
   const ledgerSel = document.getElementById('ledgerSel');
   if (ledgerSel) ledgerSel.onchange = () => { App.ledgerAcc = ledgerSel.value; App.render(); };
+  // تقرير ضريبة VAT
+  const vatFrom = document.getElementById('vatFrom');
+  if (vatFrom) vatFrom.onchange = () => { App.vatFrom = vatFrom.value; App.render(); };
+  const vatTo = document.getElementById('vatTo');
+  if (vatTo) vatTo.onchange = () => { App.vatTo = vatTo.value; App.render(); };
+  on('[data-vat-preset]', 'click', b => {
+    const now = new Date(), y = now.getFullYear();
+    if (b.dataset.vatPreset === 'month') { App.vatFrom = now.toISOString().slice(0, 7) + '-01'; App.vatTo = todayISO(); }
+    else if (b.dataset.vatPreset === 'quarter') { const q = Math.floor(now.getMonth() / 3) * 3; App.vatFrom = `${y}-${String(q + 1).padStart(2, '0')}-01`; App.vatTo = todayISO(); }
+    else { App.vatFrom = y + '-01-01'; App.vatTo = todayISO(); }
+    App.render();
+  });
+
   on('[data-je-edit]', 'click', b => openJournalDialog(b.dataset.jeEdit));
   on('[data-je-del]', 'click', b => {
     if (confirm('حذف هذا القيد نهائياً؟')) { DB.remove('journal', b.dataset.jeDel); toast('تم الحذف'); App.render(); }

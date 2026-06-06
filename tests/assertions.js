@@ -136,11 +136,34 @@
     ok(rows.length === 3 && rows[1][0] === 'علي, محمد' && rows[2][1] === '066', 'تحليل CSV مع اقتباس وفواصل');
   })();
 
-  /* 14) تصيير كل الشاشات بلا أخطاء */
+  /* 14) المرتجعات */
+  (function () {
+    const c2 = DB.upsert('partners', { name: 'عميل مرتجع', kind: 'customer' });
+    const p2 = DB.upsert('products', { name: 'منتج مرتجع', type: 'stock', salePrice: 50, cost: 30, qty: 20 });
+    const s2 = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c2.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: p2.id, qty: 4, price: 50 }] });
+    confirmDoc('sales', s2.id);
+    const arBefore = bal('ar'), outBefore = bal('vatOut');
+    const qtyAfterSale = DB.get('products', p2.id).qty;          // 16
+    createReturn('sales', s2.id);
+    ok(DB.get('sales', s2.id).returned === true, 'وسم المستند كمُرتجع');
+    eq(DB.get('products', p2.id).qty, qtyAfterSale + 4, 'استرجاع المخزون عند المرتجع');
+    eq(bal('ar'), arBefore - 230, 'تخفيض الذمم بالمرتجع (200+30 ضريبة)');
+    eq(bal('vatOut'), outBefore - 30, 'تخفيض ضريبة المخرجات بالمرتجع');
+    ok(trialBalanced(), 'الميزان متوازن بعد المرتجع');
+  })();
+
+  /* 15) تقرير ضريبة VAT */
+  (function () {
+    const out = accountRangeBalance(DB.get('accounts', Acct.id('vatOut')), '', '');
+    const inp = accountRangeBalance(DB.get('accounts', Acct.id('vatIn')), '', '');
+    ok(typeof out === 'number' && typeof inp === 'number' && out >= 0, 'حساب صافي ضريبة VAT');
+  })();
+
+  /* 16) تصيير كل الشاشات بلا أخطاء */
   let viewErr = '';
   for (const r of Object.keys(Views)) { try { if (typeof Views[r]() !== 'string') throw new Error('ليست نصاً'); } catch (e) { viewErr += `${r} `; } }
   ok(!viewErr, 'تصيير كل الشاشات: ' + viewErr);
-  for (const tab of ['accounts', 'journal', 'trial', 'ledger', 'pl', 'bs', 'close']) {
+  for (const tab of ['accounts', 'journal', 'trial', 'ledger', 'pl', 'bs', 'vat', 'close']) {
     App.acctTab = tab; try { Views.accounting(); } catch (e) { ok(false, 'تبويب محاسبة ' + tab); }
   }
 
