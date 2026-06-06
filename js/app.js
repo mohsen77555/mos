@@ -697,9 +697,22 @@ function init() {
 
   App.go('dashboard');
 
-  // تسجيل عامل الخدمة للعمل دون اتصال
+  // عامل الخدمة:
+  // - داخل تطبيق أندرويد (WebView) كل الملفات محلية أصلاً، فلا حاجة له،
+  //   بل قد يتعارض مع التحميل ويسبب خطأ ERR_CACHE_MISS → نلغيه ونزيل أي تسجيل سابق.
+  // - في المتصفح/نسخة الويب نسجّله ليعمل التطبيق دون اتصال.
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    const inAndroidApp = /MillMaintApp/.test(navigator.userAgent);
+    if (inAndroidApp) {
+      navigator.serviceWorker.getRegistrations()
+        .then(rs => rs.forEach(r => r.unregister()))
+        .catch(() => {});
+      if (window.caches && caches.keys) {
+        caches.keys().then(keys => keys.forEach(k => caches.delete(k))).catch(() => {});
+      }
+    } else {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
   }
 }
 

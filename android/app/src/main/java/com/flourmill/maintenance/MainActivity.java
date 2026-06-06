@@ -9,7 +9,10 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.webkit.ServiceWorkerClientCompat;
+import androidx.webkit.ServiceWorkerControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
+import androidx.webkit.WebViewFeature;
 
 /**
  * نشاط رئيسي يعرض تطبيق صيانة المطحنة (PWA) داخل WebView.
@@ -33,6 +36,20 @@ public class MainActivity extends Activity {
                 .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
 
+        // وجّه طلبات عامل الخدمة (إن وُجد) عبر نفس مُحمّل الأصول كإجراء أمان
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.SERVICE_WORKER_BASIC_USAGE)
+                && WebViewFeature.isFeatureSupported(
+                        WebViewFeature.SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST)) {
+            ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(
+                    new ServiceWorkerClientCompat() {
+                        @Override
+                        public WebResourceResponse shouldInterceptRequest(
+                                WebResourceRequest request) {
+                            return assetLoader.shouldInterceptRequest(request.getUrl());
+                        }
+                    });
+        }
+
         webView = new WebView(this);
 
         WebSettings s = webView.getSettings();
@@ -44,6 +61,10 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(true);
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
+        // علامة تميّز التطبيق حتى يُعطّل صفحةُ الويب عاملَ الخدمة داخل التطبيق
+        s.setUserAgentString(s.getUserAgentString() + " MillMaintApp");
+        // تحميل المحتوى مباشرة دون الاعتماد على ذاكرة التخزين المؤقت
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
