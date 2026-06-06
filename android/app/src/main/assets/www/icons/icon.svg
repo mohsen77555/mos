@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#8a5a2b"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#d4a24e" stroke-width="26"/>
+  <g fill="#f4f1ec">
+    <!-- ترس مبسط في المنتصف -->
+    <circle cx="256" cy="256" r="46"/>
+    <g fill="#d4a24e">
+      <rect x="244" y="120" width="24" height="48" rx="6"/>
+      <rect x="244" y="344" width="24" height="48" rx="6"/>
+      <rect x="120" y="244" width="48" height="24" rx="6"/>
+      <rect x="344" y="244" width="48" height="24" rx="6"/>
+      <rect x="160" y="160" width="24" height="48" rx="6" transform="rotate(45 172 184)"/>
+      <rect x="328" y="328" width="24" height="48" rx="6" transform="rotate(45 340 352)"/>
+      <rect x="328" y="160" width="24" height="48" rx="6" transform="rotate(-45 340 184)"/>
+      <rect x="160" y="328" width="24" height="48" rx="6" transform="rotate(-45 172 352)"/>
+    </g>
+    <circle cx="256" cy="256" r="22" fill="#8a5a2b"/>
+  </g>
+  <!-- سنبلة قمح -->
+  <g fill="#d4a24e">
+    <path d="M256 70c-18 22-18 54 0 76 18-22 18-54 0-76z"/>
+  </g>
+</svg>

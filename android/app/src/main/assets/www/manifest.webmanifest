@@ -1,0 +1,21 @@
+{
+  "name": "صيانة مطحنة الدقيق",
+  "short_name": "صيانة المطحنة",
+  "description": "إدارة المعدات والصيانة الدورية وأوامر العمل وقطع الغيار لمطحنة الدقيق",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f1ec",
+  "theme_color": "#8a5a2b",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

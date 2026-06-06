@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#8a5a2b" />
+  <meta name="description" content="تطبيق صيانة مطحنة الدقيق - إدارة المعدات والصيانة وأوامر العمل وقطع الغيار" />
+  <title>صيانة المطحنة</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <!-- شريط التطبيق العلوي -->
+  <header class="appbar">
+    <button id="menuBtn" class="icon-btn" aria-label="القائمة">☰</button>
+    <h1 id="pageTitle">لوحة التحكم</h1>
+    <button id="exportBtn" class="icon-btn" aria-label="نسخة احتياطية" title="نسخ/استرجاع البيانات">⇅</button>
+  </header>
+
+  <!-- المحتوى الرئيسي -->
+  <main id="view" class="view"></main>
+
+  <!-- شريط التنقل السفلي -->
+  <nav class="tabbar" id="tabbar">
+    <button class="tab active" data-route="dashboard">
+      <span class="tab-ico">🏠</span><span>الرئيسية</span>
+    </button>
+    <button class="tab" data-route="equipment">
+      <span class="tab-ico">⚙️</span><span>المعدات</span>
+    </button>
+    <button class="tab" data-route="maintenance">
+      <span class="tab-ico">🗓️</span><span>الصيانة</span>
+    </button>
+    <button class="tab" data-route="workorders">
+      <span class="tab-ico">🔧</span><span>أوامر العمل</span>
+    </button>
+    <button class="tab" data-route="parts">
+      <span class="tab-ico">📦</span><span>قطع الغيار</span>
+    </button>
+  </nav>
+
+  <!-- زر الإضافة العائم -->
+  <button id="fab" class="fab" aria-label="إضافة">＋</button>
+
+  <!-- النافذة المنبثقة (Modal) -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="modalTitle">عنوان</h2>
+        <button id="modalClose" class="icon-btn" aria-label="إغلاق">✕</button>
+      </div>
+      <form id="modalForm" class="modal-body"></form>
+    </div>
+  </div>
+
+  <!-- إشعار سريع -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
