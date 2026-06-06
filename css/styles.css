@@ -393,6 +393,9 @@ body.dark .card-actions button:active { background: #342d42; }
 .du-role { font-size: .76rem; color: var(--muted); }
 .du-logout { border: 1px solid var(--border); background: #faf9fb; border-radius: 9px; padding: 8px 12px; cursor: pointer; color: var(--danger); font-size: .85rem; }
 
+/* ===== مدى التواريخ ===== */
+.date-range { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
 /* ===== المخططات الموسّعة ===== */
 .bar-pair { display: flex; align-items: flex-end; gap: 3px; height: 100%; width: 100%; justify-content: center; }
 .bar-pair .bar { width: 42%; }

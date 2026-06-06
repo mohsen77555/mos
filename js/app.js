@@ -107,6 +107,7 @@ function esc(s) {
 }
 
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+function inRange(date, from, to) { return (!from || date >= from) && (!to || date <= to); }
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -280,10 +281,12 @@ const DEFAULT_ACCOUNTS = [
   { code: '3020', name: 'الأرباح المحتجزة', type: 'equity', role: 'retained' },
   { code: '4010', name: 'إيرادات المبيعات', type: 'income', role: 'sales' },
   { code: '4900', name: 'إيرادات أخرى', type: 'income', role: 'otherIncome' },
+  { code: '4910', name: 'أرباح فروقات أسعار الصرف', type: 'income', role: 'fxGain' },
   { code: '5010', name: 'تكلفة البضاعة المباعة', type: 'expense', role: 'cogs' },
   { code: '5020', name: 'مصروف المشتريات والخدمات', type: 'expense', role: 'purchases' },
   { code: '5030', name: 'الرواتب والأجور', type: 'expense', role: 'salaries' },
   { code: '5900', name: 'مصروفات عامة', type: 'expense', role: 'expense' },
+  { code: '5950', name: 'خسائر فروقات أسعار الصرف', type: 'expense', role: 'fxLoss' },
 ];
 
 /* ---------------------------------------------------------------------
@@ -293,10 +296,12 @@ const Acct = {
   /* زرع شجرة الحسابات وربط الأدوار — مرة واحدة */
   seed() {
     const s = DB.data.settings;
-    if (s.accountsSeeded && DB.list('accounts').length) return;
     s.acc = s.acc || {};
+    // يضمن وجود كل حساب نظامي (يضيف الناقص حتى للبيانات القديمة)
     DEFAULT_ACCOUNTS.forEach(a => {
       if (s.acc[a.role] && DB.get('accounts', s.acc[a.role])) return;
+      const existing = DB.list('accounts').find(x => x.code === a.code);
+      if (existing) { existing.role = a.role; s.acc[a.role] = existing.id; DB.save(); return; }
       const acc = DB.upsert('accounts', { code: a.code, name: a.name, type: a.type, role: a.role, opening: 0 });
       s.acc[a.role] = acc.id;
     });
@@ -356,6 +361,18 @@ const Acct = {
   netProfit() { return this.sumType('income') - this.sumType('expense'); },
 };
 
+/* رصيد حساب من القيود ضمن مدى تاريخي (لا يشمل الرصيد الافتتاحي) */
+function accountRangeBalance(acc, from, to) {
+  let debit = 0, credit = 0;
+  DB.list('journal').forEach(j => {
+    if (!inRange(j.date, from, to)) return;
+    (j.lines || []).forEach(l => {
+      if (l.accountId === acc.id) { debit += num(l.debit); credit += num(l.credit); }
+    });
+  });
+  return DEBIT_NORMAL[acc.type] ? debit - credit : credit - debit;
+}
+
 /* ترحيل قيد تأكيد مستند (مبيعات/مشتريات) */
 function postDocConfirm(coll, doc) {
   const t = docTotals(doc);
@@ -393,16 +410,27 @@ function postDocConfirm(coll, doc) {
 }
 
 /* ترحيل قيد دفعة */
-function postPayment(coll, doc, amt, method, paymentId) {
+function postPayment(coll, doc, amt, method, paymentId, payRate) {
   const cashRole = method === 'cash' ? 'cash' : 'bank';
-  const amtB = toBase(amt, doc);
+  const invRate = docRate(doc);
+  const pr = num(payRate) || invRate;
+  const cashB = +(num(amt) * pr).toFixed(2);       // النقدية المقبوضة/المدفوعة فعلاً (سعر الدفع)
+  const partyB = +(num(amt) * invRate).toFixed(2);  // الذمم المسجَّلة (سعر الفاتورة)
   const lines = [];
   if (coll === 'sales') {
-    lines.push({ accountId: Acct.id(cashRole), debit: amtB, credit: 0 });
-    lines.push({ accountId: Acct.id('ar'), debit: 0, credit: amtB });
+    // قبض: مدين النقدية بالمقبوض، دائن العملاء بالمسجَّل، والفرق ربح/خسارة صرف
+    lines.push({ accountId: Acct.id(cashRole), debit: cashB, credit: 0 });
+    lines.push({ accountId: Acct.id('ar'), debit: 0, credit: partyB });
+    const diff = +(cashB - partyB).toFixed(2);      // قبضنا أكثر = ربح
+    if (diff > 0.001) lines.push({ accountId: Acct.id('fxGain'), debit: 0, credit: diff });
+    else if (diff < -0.001) lines.push({ accountId: Acct.id('fxLoss'), debit: -diff, credit: 0 });
   } else {
-    lines.push({ accountId: Acct.id('ap'), debit: amtB, credit: 0 });
-    lines.push({ accountId: Acct.id(cashRole), debit: 0, credit: amtB });
+    // سداد: مدين الموردين بالمسجَّل، دائن النقدية بالمدفوع، والفرق ربح/خسارة صرف
+    lines.push({ accountId: Acct.id('ap'), debit: partyB, credit: 0 });
+    lines.push({ accountId: Acct.id(cashRole), debit: 0, credit: cashB });
+    const diff = +(cashB - partyB).toFixed(2);      // دفعنا أكثر = خسارة
+    if (diff > 0.001) lines.push({ accountId: Acct.id('fxLoss'), debit: diff, credit: 0 });
+    else if (diff < -0.001) lines.push({ accountId: Acct.id('fxGain'), debit: 0, credit: -diff });
   }
   Acct.post({
     date: todayISO(), ref: doc.ref,
@@ -615,6 +643,8 @@ const App = {
   payMonth: '',          // الشهر المختار في الرواتب
   posCart: [],           // سلة نقطة البيع
   posPartner: '',        // العميل المختار في نقطة البيع
+  repFrom: '',           // مدى تواريخ التقارير: من
+  repTo: '',             // مدى تواريخ التقارير: إلى
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1 },
@@ -668,10 +698,22 @@ function confirmDoc(coll, id) {
   if (lockedToast(doc.date || todayISO())) return;
   const isSale = coll === 'sales';
   const sign = isSale ? -1 : +1;            // البيع يُنقص المخزون، الشراء يزيده
+  const costSnap = [];                       // لقطة التكلفة قبل التغيير (للإلغاء)
   (doc.lines || []).forEach(l => {
     const p = DB.get('products', l.productId);
     if (p && p.type !== 'service') {
-      p.qty = num(p.qty) + sign * num(l.qty);
+      costSnap.push({ productId: p.id, cost: num(p.cost) });
+      if (!isSale) {
+        // تقييم المخزون بالمتوسط المرجّح عند الشراء
+        const oldQty = num(p.qty), oldCost = num(p.cost);
+        const addQty = num(l.qty);
+        const unitBase = toBase(num(l.price), doc);     // سعر الشراء للوحدة بالعملة الأساسية
+        const newQty = oldQty + addQty;
+        p.cost = newQty > 0 ? +(((oldQty * oldCost) + (addQty * unitBase)) / newQty).toFixed(4) : unitBase;
+        p.qty = newQty;
+      } else {
+        p.qty = num(p.qty) + sign * num(l.qty);         // البيع: التكلفة المتوسطة ثابتة
+      }
       DB.upsert('products', p);
       DB.upsert('moves', {
         date: doc.date || todayISO(),
@@ -685,6 +727,7 @@ function confirmDoc(coll, id) {
     }
   });
   doc.status = 'confirmed';
+  doc.costSnap = costSnap;
   DB.upsert(coll, doc);
   postDocConfirm(coll, doc);
   toast('تم التأكيد وترحيل المخزون والقيد المحاسبي ✅');
@@ -698,10 +741,13 @@ function cancelDoc(coll, id) {
   if (doc.status === 'confirmed' || doc.status === 'paid') {
     const isSale = coll === 'sales';
     const sign = isSale ? +1 : -1;          // عكس الترحيل
+    const snap = {};
+    (doc.costSnap || []).forEach(s => { snap[s.productId] = s.cost; });
     (doc.lines || []).forEach(l => {
       const p = DB.get('products', l.productId);
       if (p && p.type !== 'service') {
         p.qty = num(p.qty) + sign * num(l.qty);
+        if (snap[p.id] != null) p.cost = snap[p.id];   // استعادة التكلفة المتوسطة قبل العملية
         DB.upsert('products', p);
       }
     });
@@ -715,14 +761,15 @@ function cancelDoc(coll, id) {
   toast('تم إلغاء المستند وعكس القيود');
 }
 
-/* تسجيل دفعة على مستند */
-function registerPayment(coll, id, amount, method) {
+/* تسجيل دفعة على مستند (payRate = سعر الصرف يوم الدفع، اختياري) */
+function registerPayment(coll, id, amount, method, payRate) {
   const doc = DB.get(coll, id);
   if (!doc) return;
   if (lockedToast(todayISO())) return;
   const t = docTotals(doc);
   const amt = Math.min(num(amount), t.due);
   if (amt <= 0) { toast('لا يوجد مبلغ مستحق'); return; }
+  const pr = num(payRate) || docRate(doc);
   doc.paid = num(doc.paid) + amt;
   const nt = docTotals(doc);
   if (nt.due <= 0.001) doc.status = 'paid';
@@ -737,10 +784,12 @@ function registerPayment(coll, id, amount, method) {
     doc: coll,
     docId: id,
     currency: docCurCode(doc),
-    rate: docRate(doc),
+    rate: docRate(doc),     // سعر الفاتورة (لمطابقة الذمم)
+    payRate: pr,            // سعر يوم الدفع (للنقدية وفرق الصرف)
   });
-  postPayment(coll, doc, amt, method || 'cash', pay.id);
-  toast('تم تسجيل الدفعة وترحيل القيد ✅');
+  postPayment(coll, doc, amt, method || 'cash', pay.id, pr);
+  const fxNote = Math.abs(pr - docRate(doc)) > 0.0001 ? ' (مع فرق صرف)' : '';
+  toast('تم تسجيل الدفعة وترحيل القيد ✅' + fxNote);
 }
 
 /* ---------------------------------------------------------------------
@@ -1019,8 +1068,9 @@ const Views = {
 
   /* ===== التقارير ===== */
   reports() {
-    const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
-    const purchases = DB.list('purchases').filter(d => d.status === 'confirmed' || d.status === 'paid');
+    const from = App.repFrom, to = App.repTo;
+    const sales = DB.list('sales').filter(d => (d.status === 'confirmed' || d.status === 'paid') && inRange(d.date, from, to));
+    const purchases = DB.list('purchases').filter(d => (d.status === 'confirmed' || d.status === 'paid') && inRange(d.date, from, to));
 
     const salesTotal = sales.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
     const purchTotal = purchases.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
@@ -1028,7 +1078,19 @@ const Views = {
       const p = DB.get('products', l.productId); return a + num(l.qty) * (p ? num(p.cost) : 0);
     }, 0), 0);
 
-    let html = `<div class="card-actions" style="margin-top:0">
+    let html = `<div class="card">
+      <div class="date-range">
+        <div class="field" style="margin:0"><label>من تاريخ</label><input id="repFrom" type="date" value="${esc(from)}" /></div>
+        <div class="field" style="margin:0"><label>إلى تاريخ</label><input id="repTo" type="date" value="${esc(to)}" /></div>
+      </div>
+      <div class="card-actions" style="margin-top:8px">
+        <button data-rep-preset="month">هذا الشهر</button>
+        <button data-rep-preset="year">هذا العام</button>
+        <button data-rep-preset="all">الكل</button>
+      </div>
+      ${(from || to) ? `<div class="muted-text" style="margin-top:6px">الفترة: ${esc(from || '—')} ← ${esc(to || '—')}</div>` : ''}
+    </div>`;
+    html += `<div class="card-actions" style="margin-top:0">
       <button data-export="report-pdf">🖨️ تصدير PDF</button>
       <button data-export="report-csv">⬇️ تصدير Excel</button>
     </div>`;
@@ -1057,9 +1119,9 @@ const Views = {
       html += barChart(profitSeries.map(p => ({ label: p.label, value: Math.max(0, p.value) })));
     }
 
-    /* توزيع المصروفات */
+    /* توزيع المصروفات (ضمن المدى) */
     const expItems = DB.list('accounts').filter(a => a.type === 'expense')
-      .map(a => ({ label: a.name, value: +Acct.balance(a).toFixed(2) }))
+      .map(a => ({ label: a.name, value: +accountRangeBalance(a, from, to).toFixed(2) }))
       .filter(i => i.value > 0.005).sort((a, b) => b.value - a.value);
     if (expItems.length) {
       html += `<div class="section-title">💸 توزيع المصروفات</div>`;
@@ -1764,14 +1826,17 @@ function openPayDialog(coll, id) {
       ${reportRow('المتبقي', fmtDoc(t.due, doc), true)}
       ${docCurCode(doc) !== 'BASE' ? reportRow('سعر الصرف', docRate(doc) + ' / ' + baseSymbol()) : ''}
     </div>
-    <div class="field"><label>المبلغ</label><input name="amount" type="number" inputmode="decimal" step="any" min="0" value="${t.due}" required /></div>
+    <div class="field"><label>المبلغ (${esc(curSymbol(docCurCode(doc)))})</label><input name="amount" type="number" inputmode="decimal" step="any" min="0" value="${t.due}" required /></div>
+    ${docCurCode(doc) !== 'BASE' ? `<div class="field"><label>سعر الصرف يوم الدفع (مقابل ${esc(baseSymbol())})</label>
+      <input name="payRate" type="number" inputmode="decimal" step="any" min="0" value="${getCurrency(docCurCode(doc)).rate}" />
+      <div class="muted-text" style="margin-top:4px">سعر الفاتورة: ${docRate(doc)} — أي فرق يُرحَّل لحساب فروقات الصرف.</div></div>` : ''}
     <div class="field"><label>طريقة الدفع</label><select name="method">${kv(PAY_METHOD).map(o => `<option value="${o.v}">${o.l}</option>`).join('')}</select></div>
     <button type="submit" class="btn-primary">تأكيد الدفعة</button>`;
   document.getElementById('modal').classList.remove('hidden');
   document.getElementById('modalForm').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    registerPayment(coll, id, fd.get('amount'), fd.get('method'));
+    registerPayment(coll, id, fd.get('amount'), fd.get('method'), fd.get('payRate'));
     closeForm();
     document.getElementById('modalForm').onsubmit = submitForm;
     App.render();
@@ -2276,6 +2341,23 @@ function bindViewEvents() {
     else if (k === 'trial-csv') exportTrialCSV();
   });
 
+  // مدى تواريخ التقارير
+  const repFrom = document.getElementById('repFrom');
+  if (repFrom) repFrom.onchange = () => { App.repFrom = repFrom.value; App.render(); };
+  const repTo = document.getElementById('repTo');
+  if (repTo) repTo.onchange = () => { App.repTo = repTo.value; App.render(); };
+  on('[data-rep-preset]', 'click', b => {
+    const now = new Date();
+    if (b.dataset.repPreset === 'month') {
+      App.repFrom = now.toISOString().slice(0, 7) + '-01';
+      App.repTo = todayISO();
+    } else if (b.dataset.repPreset === 'year') {
+      App.repFrom = now.getFullYear() + '-01-01';
+      App.repTo = todayISO();
+    } else { App.repFrom = ''; App.repTo = ''; }
+    App.render();
+  });
+
   // الإقفال
   const lockForm = document.getElementById('lockForm');
   if (lockForm) lockForm.onsubmit = (e) => {
@@ -2485,8 +2567,9 @@ function exportCSV(name, headers, rows) {
 
 /* طباعة/تصدير PDF للتقارير (عبر نافذة الطباعة) */
 function printReport() {
-  const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
-  const purchases = DB.list('purchases').filter(d => d.status === 'confirmed' || d.status === 'paid');
+  const from = App.repFrom, to = App.repTo;
+  const sales = DB.list('sales').filter(d => (d.status === 'confirmed' || d.status === 'paid') && inRange(d.date, from, to));
+  const purchases = DB.list('purchases').filter(d => (d.status === 'confirmed' || d.status === 'paid') && inRange(d.date, from, to));
   const salesTotal = sales.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
   const purchTotal = purchases.reduce((s, d) => s + toBase(docTotals(d).total, d), 0);
   const cogs = sales.reduce((s, d) => s + (d.lines || []).reduce((a, l) => {
@@ -2537,7 +2620,7 @@ function exportTrialCSV() {
 
 /* تصدير ملخص التقرير Excel */
 function exportReportCSV() {
-  const sales = DB.list('sales').filter(d => d.status === 'confirmed' || d.status === 'paid');
+  const sales = DB.list('sales').filter(d => (d.status === 'confirmed' || d.status === 'paid') && inRange(d.date, App.repFrom, App.repTo));
   const rows = [];
   const prodMap = {};
   sales.forEach(d => (d.lines || []).forEach(l => {
