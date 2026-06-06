@@ -159,7 +159,25 @@
     ok(typeof out === 'number' && typeof inp === 'number' && out >= 0, 'حساب صافي ضريبة VAT');
   })();
 
-  /* 16) تصيير كل الشاشات بلا أخطاء */
+  /* 16) الخزينة — سندات وتحويلات */
+  (function () {
+    const cashBefore = bal('cash'), bankBefore = bal('bank');
+    postVoucher({ type: 'receipt', date: todayISO(), amount: 1000, method: 'cash', counterAccount: Acct.id('otherIncome') });
+    eq(bal('cash'), cashBefore + 1000, 'سند قبض يزيد الصندوق');
+    eq(bal('otherIncome'), 1000, 'سند قبض يقيّد الإيراد');
+    postVoucher({ type: 'payment', date: todayISO(), amount: 300, method: 'cash', counterAccount: Acct.id('expense') });
+    eq(bal('cash'), cashBefore + 700, 'سند صرف ينقص الصندوق');
+    eq(bal('expense'), 300, 'سند صرف يقيّد المصروف');
+    postVoucher({ type: 'transfer', date: todayISO(), amount: 200, fromRole: 'cash', toRole: 'bank' });
+    eq(bal('cash'), cashBefore + 500, 'التحويل ينقص الصندوق');
+    eq(bal('bank'), bankBefore + 200, 'التحويل يزيد البنك');
+    ok(trialBalanced(), 'الميزان متوازن بعد سندات الخزينة');
+    const v = DB.list('vouchers')[0]; const before = bal('cash');
+    deleteVoucher(DB.list('vouchers').find(x => x.type === 'receipt').id);
+    ok(trialBalanced(), 'الميزان متوازن بعد حذف سند');
+  })();
+
+  /* 17) تصيير كل الشاشات بلا أخطاء */
   let viewErr = '';
   for (const r of Object.keys(Views)) { try { if (typeof Views[r]() !== 'string') throw new Error('ليست نصاً'); } catch (e) { viewErr += `${r} `; } }
   ok(!viewErr, 'تصيير كل الشاشات: ' + viewErr);

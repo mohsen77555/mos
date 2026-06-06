@@ -230,7 +230,7 @@ const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales:
 /* التطبيقات المسموحة لكل دور */
 const ROLE_APPS = {
   admin: '*',
-  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'accounting', 'payroll', 'reports', 'guide'],
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'reports', 'guide'],
   sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'guide'],
   viewer: ['dashboard', 'reports', 'guide'],
 };
@@ -682,6 +682,7 @@ const APPS = [
   { route: 'inventory', label: 'المخزون', icon: '🏭', color: '#0dcaf0' },
   { route: 'manufacturing', label: 'التصنيع', icon: '🏗️', color: '#795548' },
   { route: 'invoicing', label: 'الفوترة والمدفوعات', icon: '💳', color: '#20c997' },
+  { route: 'treasury', label: 'الخزينة', icon: '🏦', color: '#0d9488' },
   { route: 'accounting', label: 'المحاسبة', icon: '🧮', color: '#dc3545' },
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
   { route: 'payroll', label: 'الرواتب', icon: '💵', color: '#e83e8c' },
@@ -705,6 +706,8 @@ const App = {
   repTo: '',             // مدى تواريخ التقارير: إلى
   vatFrom: '',           // مدى تقرير الضريبة
   vatTo: '',
+  treasTab: 'vouchers',  // تبويب الخزينة
+  recAcc: '',            // حساب التسوية البنكية
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1 },
@@ -873,6 +876,77 @@ function createReturn(coll, id) {
   doc.returned = true; doc.returnRef = ret.ref;
   DB.upsert(coll, doc);
   toast('تم إنشاء المرتجع وعكس أثره ✅');
+}
+
+/* ---------------------------------------------------------------------
+   الخزينة — سندات قبض/صرف وتحويلات بين الصناديق والبنوك
+   --------------------------------------------------------------------- */
+const VOUCHER_LABEL = { receipt: 'سند قبض', payment: 'سند صرف', transfer: 'تحويل خزينة' };
+
+function postVoucher(v) {
+  if (lockedToast(v.date)) return null;
+  const amt = num(v.amount);
+  if (amt <= 0) { toast('أدخل مبلغاً صحيحاً'); return null; }
+  const lines = [];
+  if (v.type === 'transfer') {
+    if (v.fromRole === v.toRole) { toast('اختر حسابين مختلفين'); return null; }
+    lines.push({ accountId: Acct.id(v.toRole), debit: amt, credit: 0 });
+    lines.push({ accountId: Acct.id(v.fromRole), debit: 0, credit: amt });
+  } else {
+    if (!v.counterAccount) { toast('اختر الحساب المقابل'); return null; }
+    const cashRole = v.method === 'cash' ? 'cash' : 'bank';
+    if (v.type === 'receipt') {
+      lines.push({ accountId: Acct.id(cashRole), debit: amt, credit: 0 });
+      lines.push({ accountId: v.counterAccount, debit: 0, credit: amt });
+    } else {
+      lines.push({ accountId: v.counterAccount, debit: amt, credit: 0 });
+      lines.push({ accountId: Acct.id(cashRole), debit: 0, credit: amt });
+    }
+  }
+  const rec = DB.upsert('vouchers', { ref: DB.nextRef('CV'), ...v, amount: amt });
+  Acct.post({ date: v.date, ref: rec.ref, narration: v.note || VOUCHER_LABEL[v.type], source: 'voucher', sourceId: rec.id, docId: rec.id, lines });
+  toast('تم ترحيل ' + VOUCHER_LABEL[v.type] + ' ✅');
+  return rec;
+}
+
+function deleteVoucher(id) {
+  Acct.removeByDoc(id);
+  DB.remove('vouchers', id);
+}
+
+function openVoucherDialog(type) {
+  const isTransfer = type === 'transfer';
+  const accs = DB.list('accounts').slice().sort(byCode);
+  // اقتراح الحساب المقابل: إيراد للقبض، مصروف للصرف
+  const accOpts = accs.map(a => `<option value="${a.id}">${esc(a.code)} — ${esc(a.name)}</option>`).join('');
+  document.getElementById('modalTitle').textContent = VOUCHER_LABEL[type];
+  let body = `<div class="field"><label>التاريخ</label><input name="date" type="date" value="${todayISO()}" required /></div>
+    <div class="field"><label>المبلغ</label><input name="amount" type="number" inputmode="decimal" step="any" min="0" required /></div>`;
+  if (isTransfer) {
+    body += `<div class="field"><label>من</label><select name="fromRole"><option value="cash">الصندوق</option><option value="bank">البنك</option></select></div>
+      <div class="field"><label>إلى</label><select name="toRole"><option value="bank">البنك</option><option value="cash">الصندوق</option></select></div>`;
+  } else {
+    body += `<div class="field"><label>عبر</label><select name="method"><option value="cash">الصندوق (نقدي)</option><option value="bank">البنك</option></select></div>
+      <div class="field"><label>الحساب المقابل (${type === 'receipt' ? 'مصدر القبض' : 'وجهة الصرف'})</label><select name="counterAccount" required><option value="">— اختر —</option>${accOpts}</select></div>`;
+  }
+  body += `<div class="field"><label>ملاحظة</label><input name="note" placeholder="بيان السند" /></div>
+    <button type="submit" class="btn-primary">ترحيل</button>`;
+  document.getElementById('modalForm').innerHTML = body;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const v = { type, date: fd.get('date'), amount: fd.get('amount'), note: (fd.get('note') || '').trim() };
+    if (isTransfer) { v.fromRole = fd.get('fromRole'); v.toRole = fd.get('toRole'); }
+    else { v.method = fd.get('method'); v.counterAccount = fd.get('counterAccount'); }
+    if (postVoucher(v)) { closeForm(); document.getElementById('modalForm').onsubmit = submitForm; App.render(); }
+  };
+}
+
+function toggleReconcile(journalId) {
+  const r = DB.data.settings.reconciled || (DB.data.settings.reconciled = {});
+  if (r[journalId]) delete r[journalId]; else r[journalId] = true;
+  DB.save();
 }
 
 /* تسجيل دفعة على مستند (payRate = سعر الصرف يوم الدفع، اختياري) */
@@ -1269,6 +1343,70 @@ const Views = {
       </div></div>`;
   },
 
+  /* ===== الخزينة ===== */
+  treasury() {
+    const cashB = bal => { const a = DB.get('accounts', Acct.id(bal)); return a ? Acct.balance(a) : 0; };
+    let html = `<div class="stat-grid">
+      <div class="stat-card" style="--c:#198754"><span class="ico">💵</span><div class="num">${fmtMoney(cashB('cash'))}</div><div class="lbl">رصيد الصندوق</div></div>
+      <div class="stat-card" style="--c:#0d6efd"><span class="ico">🏦</span><div class="num">${fmtMoney(cashB('bank'))}</div><div class="lbl">رصيد البنك</div></div>
+    </div>`;
+    html += `<div class="acct-tabs">
+      <button class="acct-tab ${App.treasTab === 'vouchers' ? 'active' : ''}" data-treastab="vouchers">السندات</button>
+      <button class="acct-tab ${App.treasTab === 'reconcile' ? 'active' : ''}" data-treastab="reconcile">التسوية البنكية</button>
+    </div>`;
+
+    if (App.treasTab === 'reconcile') {
+      const accs = DB.list('accounts').filter(a => a.role === 'cash' || a.role === 'bank');
+      if (!App.recAcc || !DB.get('accounts', App.recAcc)) App.recAcc = (DB.get('accounts', Acct.id('bank')) || {}).id || '';
+      const opts = accs.map(a => `<option value="${a.id}" ${a.id === App.recAcc ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
+      html += `<div class="field"><label>الحساب</label><select id="recSel">${opts}</select></div>`;
+      const acc = DB.get('accounts', App.recAcc);
+      const rmap = DB.data.settings.reconciled || {};
+      let book = num(acc ? acc.opening : 0), recon = num(acc ? acc.opening : 0);
+      const entries = [];
+      DB.list('journal').forEach(j => (j.lines || []).forEach(l => {
+        if (l.accountId === App.recAcc) entries.push({ j, amt: num(l.debit) - num(l.credit) });
+      }));
+      entries.sort((a, b) => (a.j.date || '').localeCompare(b.j.date || ''));
+      entries.forEach(e => { book += e.amt; if (rmap[e.j.id]) recon += e.amt; });
+      html += `<div class="card report-table">
+        ${reportRow('الرصيد الدفتري', fmtMoney(book))}
+        ${reportRow('الرصيد المُسوّى', fmtMoney(recon))}
+        ${reportRow('الفرق غير المُسوّى', fmtMoney(book - recon), true)}</div>`;
+      if (!entries.length) html += emptyState('🏦', 'لا توجد حركات', 'لا حركات على هذا الحساب بعد.');
+      entries.slice().reverse().forEach(e => {
+        const done = !!rmap[e.j.id];
+        html += `<div class="card"><div class="row"><div>
+            <div class="title">${esc(e.j.ref)} ${done ? '<span class="badge ok">مُسوّى</span>' : ''}</div>
+            <div class="meta">${fmtDate(e.j.date)} • ${esc(e.j.narration || '')}</div>
+          </div><span class="badge ${e.amt >= 0 ? 'ok' : 'danger'}">${e.amt >= 0 ? '+' : ''}${fmtMoney(e.amt)}</span></div>
+          <div class="card-actions"><button data-reconcile="${e.j.id}">${done ? '↩️ تراجع' : '✅ تسوية'}</button></div></div>`;
+      });
+      return html;
+    }
+
+    // تبويب السندات
+    html += `<div class="card-actions" style="margin-top:0">
+      <button data-voucher="receipt">📥 سند قبض</button>
+      <button data-voucher="payment">📤 سند صرف</button>
+      <button data-voucher="transfer">🔄 تحويل</button></div>`;
+    const vs = DB.list('vouchers').slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    if (!vs.length) html += emptyState('🧾', 'لا توجد سندات', 'أنشئ سند قبض أو صرف أو تحويل.');
+    vs.slice(0, 40).forEach(v => {
+      const inn = v.type === 'receipt';
+      const cls = inn ? 'ok' : v.type === 'transfer' ? 'info' : 'danger';
+      let desc = v.type === 'transfer'
+        ? `من ${v.fromRole === 'cash' ? 'الصندوق' : 'البنك'} إلى ${v.toRole === 'cash' ? 'الصندوق' : 'البنك'}`
+        : `${esc((DB.get('accounts', v.counterAccount) || {}).name || '')} • ${v.method === 'cash' ? 'الصندوق' : 'البنك'}`;
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(v.ref)} • ${esc(VOUCHER_LABEL[v.type])}</div>
+          <div class="meta">${fmtDate(v.date)} • ${desc}${v.note ? ' • ' + esc(v.note) : ''}</div>
+        </div><span class="badge ${cls}">${fmtMoney(v.amount)}</span></div>
+        <div class="card-actions"><button class="del" data-voucher-del="${v.id}">🗑️ حذف</button></div></div>`;
+    });
+    return html;
+  },
+
   /* ===== التقارير ===== */
   reports() {
     const from = App.repFrom, to = App.repTo;
@@ -1377,7 +1515,7 @@ const Views = {
   /* ===== الإعدادات ===== */
   settings() {
     const s = DB.data.settings;
-    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', leads: 'الفرص', boms: 'قوائم التصنيع', mos: 'أوامر التصنيع', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
+    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', returns: 'المرتجعات', vouchers: 'سندات الخزينة', leads: 'الفرص', boms: 'قوائم التصنيع', mos: 'أوامر التصنيع', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
     const counts = Object.keys(labels)
       .map(c => `<li>${esc(labels[c])}: <b>${DB.list(c).length}</b></li>`).join('');
     return `
@@ -2825,6 +2963,14 @@ function bindViewEvents() {
   // استيراد/تصدير CSV بالجملة
   on('[data-csv-export]', 'click', b => exportModelCSV(b.dataset.csvExport));
   on('[data-csv-import]', 'click', b => importModelCSV(b.dataset.csvImport));
+
+  // الخزينة
+  on('[data-treastab]', 'click', b => { App.treasTab = b.dataset.treastab; App.render(); });
+  on('[data-voucher]', 'click', b => openVoucherDialog(b.dataset.voucher));
+  on('[data-voucher-del]', 'click', b => { if (confirm('حذف السند وعكس قيده؟')) { deleteVoucher(b.dataset.voucherDel); toast('تم الحذف'); App.render(); } });
+  on('[data-reconcile]', 'click', b => { toggleReconcile(b.dataset.reconcile); App.render(); });
+  const recSel = document.getElementById('recSel');
+  if (recSel) recSel.onchange = () => { App.recAcc = recSel.value; App.render(); };
 
   // تصدير التقارير
   on('[data-export]', 'click', b => {
