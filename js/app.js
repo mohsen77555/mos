@@ -27,11 +27,15 @@ const DB = {
       accounts: [],   // شجرة الحسابات
       journal: [],    // قيود اليومية (القيد المزدوج)
       payslips: [],   // مسيّر الرواتب
+      leads: [],      // CRM — الفرص البيعية
+      boms: [],       // قوائم مكوّنات التصنيع
+      mos: [],        // أوامر التصنيع
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
+        vatNo: '',              // الرقم الضريبي (للفاتورة الإلكترونية)
         taxRate: 15,
-        seq: { SO: 0, PO: 0, JE: 0, PR: 0 },
+        seq: { SO: 0, PO: 0, JE: 0, PR: 0, MO: 0 },
         acc: {},                 // ربط الأدوار بالحسابات (cash, ar, ...)
         accountsSeeded: false,
         lockDate: '',            // تاريخ إقفال الفترة (يمنع التعديل قبله)
@@ -194,9 +198,9 @@ const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales:
 /* التطبيقات المسموحة لكل دور */
 const ROLE_APPS = {
   admin: '*',
-  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'invoicing', 'accounting', 'payroll', 'reports'],
-  sales: ['dashboard', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing'],
-  viewer: ['dashboard', 'reports'],
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'accounting', 'payroll', 'reports', 'guide'],
+  sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'guide'],
+  viewer: ['dashboard', 'reports', 'guide'],
 };
 
 const Auth = {
@@ -255,6 +259,8 @@ const DOC_STATUS = { draft: 'مسودة', confirmed: 'مؤكد', paid: 'مدفو
 const PAY_METHOD = { cash: 'نقدي', bank: 'تحويل بنكي', card: 'بطاقة', cheque: 'شيك' };
 const PRODUCT_CATS = ['عام', 'مواد خام', 'منتج تام', 'خدمات', 'مكتبية', 'إلكترونيات', 'أخرى'];
 const DEPARTMENTS = ['الإدارة', 'المبيعات', 'المشتريات', 'المحاسبة', 'المخزون', 'الإنتاج', 'الموارد البشرية', 'تقنية المعلومات', 'أخرى'];
+const LEAD_STAGES = { new: 'جديد', qualified: 'مؤهَّل', proposal: 'عرض سعر', won: 'مكسوب', lost: 'خاسر' };
+const STAGE_ORDER = ['new', 'qualified', 'proposal', 'won', 'lost'];
 
 /* أنواع الحسابات المحاسبية */
 const ACCOUNT_TYPES = {
@@ -599,6 +605,20 @@ const Models = {
     ],
   },
 
+  leads: {
+    label: 'فرصة', plural: 'الفرص البيعية', icon: '🎯', menu: false,
+    title: r => r.name,
+    searchFields: ['name', 'contact', 'phone'],
+    fields: [
+      { name: 'name', label: 'عنوان الفرصة *', type: 'text', required: true },
+      { name: 'contact', label: 'جهة الاتصال', type: 'text' },
+      { name: 'phone', label: 'الهاتف', type: 'tel' },
+      { name: 'value', label: 'القيمة المتوقعة', type: 'number', default: 0 },
+      { name: 'stage', label: 'المرحلة', type: 'select', options: kv(LEAD_STAGES), default: 'new' },
+      { name: 'note', label: 'ملاحظات', type: 'textarea' },
+    ],
+  },
+
   accounts: {
     label: 'حساب', plural: 'الحسابات', icon: '🧮', menu: false,
     title: r => `${r.code} — ${r.name}`,
@@ -620,15 +640,18 @@ const APPS = [
   { route: 'dashboard', label: 'لوحة التحكم', icon: '📊', color: '#714B67' },
   { route: 'partners', label: 'جهات الاتصال', icon: '👥', color: '#0d6efd' },
   { route: 'products', label: 'المنتجات', icon: '📦', color: '#6610f2' },
+  { route: 'crm', label: 'إدارة العلاقات (CRM)', icon: '🎯', color: '#e83e8c' },
   { route: 'pos', label: 'نقطة البيع', icon: '🛍️', color: '#fd7e14' },
   { route: 'sales', label: 'المبيعات', icon: '🧾', color: '#198754' },
   { route: 'purchases', label: 'المشتريات', icon: '🛒', color: '#d63384' },
   { route: 'inventory', label: 'المخزون', icon: '🏭', color: '#0dcaf0' },
+  { route: 'manufacturing', label: 'التصنيع', icon: '🏗️', color: '#795548' },
   { route: 'invoicing', label: 'الفوترة والمدفوعات', icon: '💳', color: '#20c997' },
   { route: 'accounting', label: 'المحاسبة', icon: '🧮', color: '#dc3545' },
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
   { route: 'payroll', label: 'الرواتب', icon: '💵', color: '#e83e8c' },
   { route: 'reports', label: 'التقارير', icon: '📈', color: '#6f42c1' },
+  { route: 'guide', label: 'دليل الاستخدام', icon: '❓', color: '#607d8b' },
   { route: 'settings', label: 'الإعدادات', icon: '⚙️', color: '#6c757d' },
 ];
 
@@ -647,7 +670,7 @@ const App = {
   repTo: '',             // مدى تواريخ التقارير: إلى
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
-  fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1 },
+  fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1 },
 
   go(route) {
     if (!Auth.user) { showLogin(); return; }
@@ -1066,6 +1089,95 @@ const Views = {
       </div>`;
   },
 
+  /* ===== CRM — لوحة الفرص حسب المرحلة ===== */
+  crm() {
+    const leads = DB.list('leads');
+    const totalOpen = leads.filter(l => l.stage !== 'won' && l.stage !== 'lost').reduce((s, l) => s + num(l.value), 0);
+    const won = leads.filter(l => l.stage === 'won').reduce((s, l) => s + num(l.value), 0);
+    let html = `<div class="stat-grid">
+      <div class="stat-card" style="--c:#e83e8c"><span class="ico">🎯</span><div class="num">${fmtMoney(totalOpen)}</div><div class="lbl">فرص مفتوحة</div></div>
+      <div class="stat-card" style="--c:#198754"><span class="ico">🏆</span><div class="num">${fmtMoney(won)}</div><div class="lbl">صفقات مكسوبة</div></div>
+    </div>`;
+    if (!leads.length) return html + emptyState('🎯', 'لا توجد فرص', 'اضغط «＋» لإضافة فرصة بيعية.');
+    STAGE_ORDER.forEach(stage => {
+      const group = leads.filter(l => l.stage === stage);
+      if (!group.length) return;
+      const sum = group.reduce((s, l) => s + num(l.value), 0);
+      const cls = stage === 'won' ? 'ok' : stage === 'lost' ? 'danger' : 'info';
+      html += `<div class="section-title">${esc(LEAD_STAGES[stage])} <span class="muted-text">(${group.length} — ${fmtMoney(sum)})</span></div>`;
+      group.forEach(l => {
+        const idx = STAGE_ORDER.indexOf(stage);
+        const next = idx < 3 ? STAGE_ORDER[idx + 1] : null;   // التالي حتى «مكسوب»
+        html += `<div class="card"><div class="row"><div>
+            <div class="title">${esc(l.name)}</div>
+            <div class="meta">${esc(l.contact || '')}${l.phone ? ' • ' + esc(l.phone) : ''}</div>
+          </div><span class="badge ${cls}">${fmtMoney(l.value)}</span></div>
+          <div class="card-actions">
+            ${next && stage !== 'won' ? `<button data-lead-move="${l.id}:${next}">▶️ ${esc(LEAD_STAGES[next])}</button>` : ''}
+            ${stage !== 'won' && stage !== 'lost' ? `<button data-lead-win="${l.id}">🏆 تحويل لعميل</button>` : ''}
+            ${stage !== 'lost' && stage !== 'won' ? `<button class="del" data-lead-move="${l.id}:lost">✖️ خاسر</button>` : ''}
+            <button data-edit="leads:${l.id}">✏️</button>
+            <button class="del" data-del="leads:${l.id}">🗑️</button>
+          </div></div>`;
+      });
+    });
+    return html;
+  },
+
+  /* ===== التصنيع — قوائم المكوّنات وأوامر التصنيع ===== */
+  manufacturing() {
+    const boms = DB.list('boms');
+    let html = `<div class="card" style="display:flex;justify-content:space-between;align-items:center">
+      <div class="meta">قوائم المكوّنات: <b>${boms.length}</b> • أوامر التصنيع: <b>${DB.list('mos').length}</b></div>
+      <button class="mini-btn" id="addBomBtnTop">＋ قائمة مكوّنات</button></div>`;
+    if (!DB.list('products').length) return html + emptyState('🏗️', 'لا توجد منتجات', 'أضِف منتجات أولاً لتعريف قوائم المكوّنات.');
+    if (!boms.length) html += emptyState('🏗️', 'لا توجد قوائم مكوّنات', 'عرّف منتجاً تاماً ومكوّناته ثم نفّذ أمر تصنيع.');
+    boms.forEach(b => {
+      const comps = (b.components || []).map(c => `${esc(productName(c.productId))} ×${fmtQty(c.qty)}`).join('، ');
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">🏗️ ${esc(productName(b.productId))}</div>
+          <div class="meta">${esc(comps)}</div>
+        </div><span class="badge info">${fmtMoney(bomCost(b))}</span></div>
+        <div class="card-actions">
+          <button data-produce="${b.id}">⚙️ تصنيع</button>
+          <button data-bom-edit="${b.id}">✏️ تعديل</button>
+          <button class="del" data-bom-del="${b.id}">🗑️</button>
+        </div></div>`;
+    });
+    const orders = DB.list('mos').slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 15);
+    if (orders.length) {
+      html += `<div class="section-title">📋 أحدث أوامر التصنيع</div>`;
+      orders.forEach(o => {
+        html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(o.ref)} • ${esc(productName(o.productId))}</div>
+          <div class="meta">${fmtDate(o.date)} • تكلفة الوحدة: ${fmtMoney(o.unitCost)}</div>
+        </div><span class="badge ok">${fmtQty(o.qty)}</span></div></div>`;
+      });
+    }
+    return html;
+  },
+
+  /* ===== دليل الاستخدام ===== */
+  guide() {
+    const step = (n, t, d) => `<div class="card"><div class="row"><div>
+      <div class="title">${n}. ${esc(t)}</div><div class="meta">${d}</div></div></div></div>`;
+    return `
+      <div class="section-title">🚀 البدء السريع</div>
+      ${step(1, 'الإعدادات', 'حدّد اسم الشركة، العملة، نسبة الضريبة، والرقم الضريبي. أضِف المستخدمين وأدوارهم. يمكنك تحميل <b>بيانات تجريبية</b> للتجربة.')}
+      ${step(2, 'جهات الاتصال والمنتجات', 'أضِف العملاء والموردين، ثم المنتجات بأسعار البيع والتكلفة والكمية ووحدة القياس.')}
+      ${step(3, 'المشتريات', 'أنشئ أمر شراء ← <b>تأكيد</b> (يزيد المخزون ويحدّث التكلفة بالمتوسط المرجّح ويرحّل القيد) ← <b>تسجيل دفعة</b>.')}
+      ${step(4, 'المبيعات / نقطة البيع', 'أنشئ أمر بيع أو استخدم <b>نقطة البيع</b> بالباركود. التأكيد يخصم المخزون ويرحّل الإيراد وتكلفة البضاعة، ثم سجّل الدفعة واطبع الفاتورة (مع <b>رمز ZATCA</b>).')}
+      ${step(5, 'المحاسبة', 'كل العمليات تُرحَّل تلقائياً بقيد مزدوج. راجع ميزان المراجعة ودفتر الأستاذ وقائمة الدخل والميزانية، وسجّل قيوداً يدوية عند الحاجة، وأقفل الفترة دورياً.')}
+      ${step(6, 'CRM والتصنيع والرواتب', 'تابع الفرص البيعية ومراحلها، عرّف قوائم مكوّنات التصنيع ونفّذ أوامر الإنتاج، وشغّل مسيّر الرواتب الشهري.')}
+      ${step(7, 'التقارير والنسخ الاحتياطي', 'صفِّ التقارير بمدى تواريخ وصدّرها PDF/Excel. صدّر نسخة احتياطية (JSON) بانتظام من الإعدادات.')}
+      <div class="section-title">💡 ملاحظات</div>
+      <div class="card"><div class="meta">
+        • كل البيانات محفوظة محلياً على جهازك فقط (لا خادم).<br>
+        • المستندات المؤكدة لا تُعدَّل؛ ألغِها لعكس أثرها بالكامل.<br>
+        • استخدم زر السمة 🌙 للتبديل بين الوضع الفاتح والداكن.
+      </div></div>`;
+  },
+
   /* ===== التقارير ===== */
   reports() {
     const from = App.repFrom, to = App.repTo;
@@ -1174,13 +1286,14 @@ const Views = {
   /* ===== الإعدادات ===== */
   settings() {
     const s = DB.data.settings;
-    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
+    const labels = { partners: 'جهات الاتصال', products: 'المنتجات', sales: 'المبيعات', purchases: 'المشتريات', leads: 'الفرص', boms: 'قوائم التصنيع', mos: 'أوامر التصنيع', employees: 'الموظفون', payslips: 'قسائم الرواتب', payments: 'المدفوعات', moves: 'حركات المخزون', accounts: 'الحسابات', journal: 'قيود اليومية' };
     const counts = Object.keys(labels)
       .map(c => `<li>${esc(labels[c])}: <b>${DB.list(c).length}</b></li>`).join('');
     return `
       <div class="section-title">🏢 بيانات الشركة</div>
       <form id="settingsForm" class="card">
         <div class="field"><label>اسم الشركة</label><input name="company" value="${esc(s.company)}" /></div>
+        <div class="field"><label>الرقم الضريبي (للفاتورة الإلكترونية)</label><input name="vatNo" value="${esc(s.vatNo || '')}" inputmode="numeric" /></div>
         <div class="field"><label>رمز العملة</label><input name="currency" value="${esc(s.currency)}" /></div>
         <div class="field"><label>نسبة الضريبة (%)</label><input name="taxRate" type="number" min="0" value="${esc(s.taxRate)}" /></div>
         <button type="submit" class="btn-primary">حفظ الإعدادات</button>
@@ -1193,6 +1306,7 @@ const Views = {
           <button data-action="import">⬆️ استيراد نسخة</button>
         </div>
         <div class="card-actions">
+          <button data-action="demo">🧪 تحميل بيانات تجريبية</button>
           <button class="del" data-action="reset">🗑️ تصفير كل البيانات</button>
         </div>
         <div class="divider"></div>
@@ -1748,6 +1862,7 @@ function openForm(coll, id = null) {
     sales: id ? 'تعديل أمر بيع' : 'أمر بيع جديد',
     purchases: id ? 'تعديل أمر شراء' : 'أمر شراء جديد',
     accounts: id ? 'تعديل حساب' : 'حساب جديد',
+    leads: id ? 'تعديل فرصة' : 'فرصة بيعية جديدة',
   };
   currentForm = { coll, id, kind: isDoc ? 'doc' : 'model' };
   document.getElementById('modalTitle').textContent = titles[coll] || 'نموذج';
@@ -1765,6 +1880,8 @@ function closeForm() {
   lineDraft = [];
   jeDraft = [];
   jeEditId = null;
+  bomDraft = [];
+  bomEditId = null;
 }
 
 function submitForm(e) {
@@ -1990,6 +2107,15 @@ function printDoc(coll, id) {
     <tr><td>${i + 1}</td><td>${esc(productName(l.productId))}</td>
     <td>${fmtQty(l.qty)}</td><td>${fmtDoc(l.price, doc)}</td>
     <td>${fmtDoc(num(l.qty) * num(l.price), doc)}</td></tr>`).join('');
+  // رمز ZATCA للفواتير الضريبية (مبيعات)
+  let qrHtml = '';
+  if (isSale && typeof QR !== 'undefined') {
+    try {
+      const b64 = zatcaBase64(doc);
+      qrHtml = `<div class="qr"><div class="qr-img">${QR.svg(b64, 3, 2)}</div>
+        <div class="muted" style="font-size:11px">فاتورة ضريبية — ZATCA${s.vatNo ? ' • الرقم الضريبي: ' + esc(s.vatNo) : ''}</div></div>`;
+    } catch (e) { qrHtml = ''; }
+  }
   const w = window.open('', '_blank');
   if (!w) { toast('فعّل النوافذ المنبثقة للطباعة'); return; }
   w.document.write(`<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
@@ -2003,20 +2129,25 @@ function printDoc(coll, id) {
       th{background:#f3eef2} .totals{margin-top:14px;width:300px;margin-right:auto}
       .totals .r{display:flex;justify-content:space-between;padding:5px 0}
       .totals .s{font-weight:bold;border-top:2px solid #714B67;font-size:16px}
+      .qr{margin-top:20px;text-align:center} .qr-img{display:inline-block}
+      .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:8px}
     </style></head><body>
     <div class="head">
-      <div><h1>${esc(s.company)}</h1><div class="muted">${isSale ? 'فاتورة مبيعات' : 'فاتورة مشتريات'}</div></div>
+      <div><h1>${esc(s.company)}</h1><div class="muted">${isSale ? 'فاتورة ضريبية' : 'فاتورة مشتريات'}</div>${s.vatNo ? `<div class="muted">الرقم الضريبي: ${esc(s.vatNo)}</div>` : ''}</div>
       <div style="text-align:left"><div><b>${esc(doc.ref)}</b></div><div class="muted">${fmtDate(doc.date)}</div></div>
     </div>
     <div><b>${isSale ? 'العميل' : 'المورد'}:</b> ${esc(partnerName(doc.partnerId))}</div>
     <table><thead><tr><th>#</th><th>المنتج</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead>
     <tbody>${rows}</tbody></table>
-    <div class="totals">
-      <div class="r"><span>المجموع الفرعي</span><span>${fmtDoc(t.subtotal, doc)}</span></div>
-      <div class="r"><span>الضريبة (${s.taxRate}%)</span><span>${fmtDoc(t.tax, doc)}</span></div>
-      <div class="r s"><span>الإجمالي</span><span>${fmtDoc(t.total, doc)}</span></div>
-      <div class="r"><span>المدفوع</span><span>${fmtDoc(t.paid, doc)}</span></div>
-      <div class="r"><span>المتبقي</span><span>${fmtDoc(t.due, doc)}</span></div>
+    <div class="foot">
+      ${qrHtml}
+      <div class="totals">
+        <div class="r"><span>المجموع الفرعي</span><span>${fmtDoc(t.subtotal, doc)}</span></div>
+        <div class="r"><span>الضريبة (${s.taxRate}%)</span><span>${fmtDoc(t.tax, doc)}</span></div>
+        <div class="r s"><span>الإجمالي</span><span>${fmtDoc(t.total, doc)}</span></div>
+        <div class="r"><span>المدفوع</span><span>${fmtDoc(t.paid, doc)}</span></div>
+        <div class="r"><span>المتبقي</span><span>${fmtDoc(t.due, doc)}</span></div>
+      </div>
     </div>
     <script>window.onload=function(){window.print()}<\/script>
     </body></html>`);
@@ -2282,6 +2413,214 @@ function openUserDialog(id) {
 }
 
 /* ---------------------------------------------------------------------
+   CRM — نقل مراحل الفرص وتحويل المكسوبة إلى أمر بيع
+   --------------------------------------------------------------------- */
+function moveLeadStage(id, stage) {
+  const l = DB.get('leads', id);
+  if (!l) return;
+  l.stage = stage;
+  DB.upsert('leads', l);
+  toast('تم نقل الفرصة إلى: ' + LEAD_STAGES[stage]);
+}
+
+function convertLead(id) {
+  const l = DB.get('leads', id);
+  if (!l) return;
+  // إنشاء/إيجاد جهة اتصال بنفس الاسم
+  let p = DB.list('partners').find(x => x.name === (l.contact || l.name));
+  if (!p) p = DB.upsert('partners', { name: l.contact || l.name, kind: 'customer', phone: l.phone || '' });
+  l.stage = 'won'; l.partnerId = p.id;
+  DB.upsert('leads', l);
+  toast('تم تحويل الفرصة إلى عميل — أنشئ أمر بيع له الآن');
+  App.posPartner = '';
+  App.go('sales');
+  openForm('sales');
+}
+
+/* ---------------------------------------------------------------------
+   التصنيع — قوائم المكوّنات (BOM) وأوامر التصنيع
+   --------------------------------------------------------------------- */
+function bomCost(bom) {
+  return (bom.components || []).reduce((s, c) => {
+    const p = DB.get('products', c.productId);
+    return s + (p ? num(p.cost) * num(c.qty) : 0);
+  }, 0);
+}
+
+/* تنفيذ أمر تصنيع: استهلاك المكوّنات وإنتاج المنتج التام */
+function produce(bomId, qty) {
+  const bom = DB.get('boms', bomId);
+  if (!bom) return;
+  qty = num(qty) || 1;
+  const finished = DB.get('products', bom.productId);
+  if (!finished) { toast('المنتج التام غير موجود'); return; }
+  // تحقق من توفّر المكوّنات
+  for (const c of bom.components || []) {
+    const p = DB.get('products', c.productId);
+    if (p && p.type !== 'service' && num(p.qty) < num(c.qty) * qty) {
+      toast('كمية غير كافية من: ' + p.name); return;
+    }
+  }
+  const date = todayISO();
+  if (lockedToast(date)) return;
+  let unitCost = 0;
+  (bom.components || []).forEach(c => {
+    const p = DB.get('products', c.productId);
+    if (!p) return;
+    const used = num(c.qty) * qty;
+    unitCost += num(p.cost) * num(c.qty);
+    if (p.type !== 'service') {
+      p.qty = num(p.qty) - used;
+      DB.upsert('products', p);
+      DB.upsert('moves', { date, productId: p.id, qty: -used, type: 'out', ref: 'تصنيع', doc: 'mo' });
+    }
+  });
+  // إضافة المنتج التام بتكلفة متوسطة مرجّحة
+  const oldQty = num(finished.qty), oldCost = num(finished.cost);
+  const newQty = oldQty + qty;
+  finished.cost = newQty > 0 ? +(((oldQty * oldCost) + (qty * unitCost)) / newQty).toFixed(4) : unitCost;
+  finished.qty = newQty;
+  DB.upsert('products', finished);
+  DB.upsert('moves', { date, productId: finished.id, qty: qty, type: 'in', ref: 'تصنيع', doc: 'mo' });
+  DB.upsert('mos', { ref: DB.nextRef('MO'), bomId, productId: finished.id, qty, unitCost, date });
+  toast(`تم تصنيع ${fmtQty(qty)} ${esc(finished.uom || '')} ✅`);
+}
+
+function openBomDialog(id) {
+  const bom = id ? DB.get('boms', id) : { productId: '', components: [] };
+  bomDraft = (bom.components || []).map(c => ({ ...c }));
+  bomEditId = id;
+  const stockProds = DB.list('products');
+  const prodOpts = stockProds.map(p => `<option value="${p.id}" ${bom.productId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+  document.getElementById('modalTitle').textContent = id ? 'تعديل قائمة مكوّنات' : 'قائمة مكوّنات جديدة';
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>المنتج التام *</label><select name="productId" required><option value="">— اختر —</option>${prodOpts}</select></div>
+    <div class="lines-editor">
+      <div class="lines-head"><span>المكوّنات</span><button type="button" class="mini-btn" id="addBomBtn">＋ مكوّن</button></div>
+      <div id="bomList"></div>
+    </div>
+    <button type="submit" class="btn-primary">حفظ القائمة</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  renderBomLines();
+  document.getElementById('addBomBtn').onclick = () => { bomDraft.push({ productId: '', qty: 1 }); renderBomLines(); };
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const pid = fd.get('productId');
+    const comps = bomDraft.filter(c => c.productId && num(c.qty) > 0).map(c => ({ productId: c.productId, qty: num(c.qty) }));
+    if (!pid || !comps.length) { toast('اختر المنتج وأضِف مكوّناً'); return; }
+    DB.upsert('boms', { id: bomEditId || undefined, productId: pid, components: comps });
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    toast('تم حفظ قائمة المكوّنات ✅');
+    App.render();
+  };
+}
+
+function renderBomLines() {
+  const wrap = document.getElementById('bomList');
+  if (!wrap) return;
+  const prods = DB.list('products');
+  wrap.innerHTML = bomDraft.length ? bomDraft.map((c, i) => {
+    const opts = prods.map(p => `<option value="${p.id}" ${c.productId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
+    return `<div class="line-edit" data-i="${i}" style="grid-template-columns:1fr 70px 32px">
+      <select class="bom-prod"><option value="">— مكوّن —</option>${opts}</select>
+      <input class="bom-qty" type="number" inputmode="decimal" step="any" min="0" value="${esc(c.qty)}" placeholder="كمية" />
+      <button type="button" class="ln-del" data-i="${i}">✕</button></div>`;
+  }).join('') : '<div class="muted-text" style="padding:8px 0">أضِف مكوّناً واحداً على الأقل.</div>';
+  document.querySelectorAll('#bomList .line-edit').forEach(row => {
+    const i = +row.dataset.i;
+    row.querySelector('.bom-prod').onchange = e => { bomDraft[i].productId = e.target.value; };
+    row.querySelector('.bom-qty').oninput = e => { bomDraft[i].qty = e.target.value; };
+  });
+  document.querySelectorAll('#bomList .ln-del').forEach(b => { b.onclick = () => { bomDraft.splice(+b.dataset.i, 1); renderBomLines(); }; });
+}
+
+function openProduceDialog(bomId) {
+  const bom = DB.get('boms', bomId);
+  if (!bom) return;
+  document.getElementById('modalTitle').textContent = 'تنفيذ أمر تصنيع';
+  document.getElementById('modalForm').innerHTML = `
+    <div class="meta" style="margin-bottom:12px">المنتج: <b>${esc(productName(bom.productId))}</b> • تكلفة الوحدة المقدّرة: <b>${fmtMoney(bomCost(bom))}</b></div>
+    <div class="field"><label>الكمية المراد إنتاجها</label><input name="qty" type="number" inputmode="decimal" step="any" min="1" value="1" required /></div>
+    <button type="submit" class="btn-primary">تصنيع</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    produce(bomId, new FormData(e.target).get('qty'));
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    App.render();
+  };
+}
+
+let bomDraft = [];
+let bomEditId = null;
+
+/* ---------------------------------------------------------------------
+   الفاتورة الإلكترونية — رمز ZATCA (TLV ثم Base64)
+   --------------------------------------------------------------------- */
+function tlvField(tag, valueStr) {
+  const bytes = [];
+  for (const ch of unescape(encodeURIComponent(valueStr))) bytes.push(ch.charCodeAt(0));
+  return [tag, bytes.length, ...bytes];
+}
+function zatcaBase64(doc) {
+  const s = DB.data.settings;
+  const t = docTotals(doc);
+  const ts = (doc.date || todayISO()) + 'T' + new Date().toTimeString().slice(0, 8) + 'Z';
+  const bytes = [
+    ...tlvField(1, s.company || ''),
+    ...tlvField(2, s.vatNo || ''),
+    ...tlvField(3, ts),
+    ...tlvField(4, toBase(t.total, doc).toFixed(2)),
+    ...tlvField(5, toBase(t.tax, doc).toFixed(2)),
+  ];
+  let bin = '';
+  bytes.forEach(b => bin += String.fromCharCode(b));
+  return (typeof btoa !== 'undefined') ? btoa(bin) : Buffer.from(bin, 'binary').toString('base64');
+}
+
+/* ---------------------------------------------------------------------
+   البيانات التجريبية
+   --------------------------------------------------------------------- */
+function loadDemoData() {
+  if (DB.list('sales').length || DB.list('products').length > 0) {
+    if (!confirm('سيتم إضافة بيانات تجريبية فوق بياناتك الحالية. متابعة؟')) return;
+  }
+  const c1 = DB.upsert('partners', { name: 'مؤسسة النور التجارية', kind: 'customer', phone: '0551234567', city: 'الرياض' });
+  const c2 = DB.upsert('partners', { name: 'شركة الأفق', kind: 'customer', phone: '0537654321', city: 'جدة' });
+  const v1 = DB.upsert('partners', { name: 'موردون المتحدة', kind: 'vendor', phone: '0590001112', city: 'الدمام' });
+  const p1 = DB.upsert('products', { name: 'لابتوب', code: '1001', type: 'stock', category: 'إلكترونيات', salePrice: 3500, cost: 2800, qty: 0, uom: 'قطعة', minQty: 3 });
+  const p2 = DB.upsert('products', { name: 'طابعة', code: '1002', type: 'stock', category: 'إلكترونيات', salePrice: 800, cost: 600, qty: 0, uom: 'قطعة', minQty: 2 });
+  const p3 = DB.upsert('products', { name: 'حبر طابعة', code: '1003', type: 'stock', category: 'مكتبية', salePrice: 120, cost: 70, qty: 0, uom: 'علبة', minQty: 10 });
+  const p4 = DB.upsert('products', { name: 'صيانة سنوية', code: '2001', type: 'service', category: 'خدمات', salePrice: 500, cost: 0 });
+  DB.upsert('employees', { name: 'خالد المحمد', job: 'محاسب', department: 'المحاسبة', salary: 6000, hireDate: '2024-01-15' });
+  DB.upsert('employees', { name: 'سارة العتيبي', job: 'مندوب مبيعات', department: 'المبيعات', salary: 5000, hireDate: '2024-03-01' });
+  DB.upsert('leads', { name: 'صفقة 20 لابتوب', contact: 'مؤسسة النور التجارية', phone: '0551234567', value: 70000, stage: 'proposal' });
+  DB.upsert('leads', { name: 'عقد صيانة', contact: 'شركة الأفق', phone: '0537654321', value: 6000, stage: 'qualified' });
+  // مشتريات (لتعبئة المخزون)
+  const po = DB.upsert('purchases', { ref: DB.nextRef('PO'), partnerId: v1.id, date: thisMonth('05'), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [
+    { productId: p1.id, qty: 10, price: 2800 }, { productId: p2.id, qty: 8, price: 600 }, { productId: p3.id, qty: 50, price: 70 },
+  ] });
+  confirmDoc('purchases', po.id);
+  registerPayment('purchases', po.id, docTotals(DB.get('purchases', po.id)).total, 'bank');
+  // مبيعات
+  const so1 = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c1.id, date: thisMonth('10'), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [
+    { productId: p1.id, qty: 3, price: 3500 }, { productId: p4.id, qty: 1, price: 500 },
+  ] });
+  confirmDoc('sales', so1.id);
+  registerPayment('sales', so1.id, docTotals(DB.get('sales', so1.id)).total, 'cash');
+  const so2 = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c2.id, date: thisMonth('15'), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [
+    { productId: p2.id, qty: 2, price: 800 }, { productId: p3.id, qty: 10, price: 120 },
+  ] });
+  confirmDoc('sales', so2.id);   // غير مدفوعة (ذمم مدينة)
+  toast('تم تحميل البيانات التجريبية ✅');
+  App.go('dashboard');
+}
+function thisMonth(day) { return todayISO().slice(0, 7) + '-' + day; }
+
+/* ---------------------------------------------------------------------
    15) ربط أحداث العرض
    --------------------------------------------------------------------- */
 function bindViewEvents() {
@@ -2419,6 +2758,7 @@ function bindViewEvents() {
     e.preventDefault();
     const fd = new FormData(e.target);
     DB.data.settings.company = (fd.get('company') || 'شركتي').trim();
+    DB.data.settings.vatNo = (fd.get('vatNo') || '').trim();
     DB.data.settings.currency = (fd.get('currency') || 'ر.س').trim();
     DB.data.settings.taxRate = num(fd.get('taxRate'));
     DB.save();
@@ -2430,7 +2770,21 @@ function bindViewEvents() {
     if (b.dataset.action === 'export') exportData();
     else if (b.dataset.action === 'import') importData();
     else if (b.dataset.action === 'reset') resetData();
+    else if (b.dataset.action === 'demo') loadDemoData();
   });
+
+  // CRM
+  on('[data-lead-move]', 'click', b => { const [i, st] = b.dataset.leadMove.split(':'); moveLeadStage(i, st); App.render(); });
+  on('[data-lead-win]', 'click', b => convertLead(b.dataset.leadWin));
+
+  // التصنيع
+  on('[data-produce]', 'click', b => openProduceDialog(b.dataset.produce));
+  on('[data-bom-edit]', 'click', b => openBomDialog(b.dataset.bomEdit));
+  on('[data-bom-del]', 'click', b => {
+    if (confirm('حذف قائمة المكوّنات؟')) { DB.remove('boms', b.dataset.bomDel); toast('تم الحذف'); App.render(); }
+  });
+  const addBomTop = document.getElementById('addBomBtnTop');
+  if (addBomTop) addBomTop.onclick = () => openBomDialog();
 
   // العملات
   const addCur = document.getElementById('addCurBtn');
@@ -2717,6 +3071,7 @@ function init() {
       else if (App.acctTab === 'journal') openJournalDialog();
       return;
     }
+    if (App.route === 'crm') { openForm('leads'); return; }
     if (App.fabRoutes[App.route]) openForm(App.route);
   };
   document.getElementById('modalClose').onclick = closeForm;
