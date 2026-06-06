@@ -3001,6 +3001,11 @@ function loadDemoData() {
   if (DB.list('sales').length || DB.list('products').length > 0) {
     if (!confirm('سيتم إضافة بيانات تجريبية فوق بياناتك الحالية. متابعة؟')) return;
   }
+  // رأس مال افتتاحي (لتمويل الخزينة قبل المشتريات)
+  Acct.post({ date: thisMonth('01'), narration: 'رأس المال الافتتاحي', source: 'manual', lines: [
+    { accountId: Acct.id('bank'), debit: 100000, credit: 0 },
+    { accountId: Acct.id('capital'), debit: 0, credit: 100000 },
+  ] });
   const c1 = DB.upsert('partners', { name: 'مؤسسة النور التجارية', kind: 'customer', phone: '0551234567', city: 'الرياض' });
   const c2 = DB.upsert('partners', { name: 'شركة الأفق', kind: 'customer', phone: '0537654321', city: 'جدة' });
   const v1 = DB.upsert('partners', { name: 'موردون المتحدة', kind: 'vendor', phone: '0590001112', city: 'الدمام' });
