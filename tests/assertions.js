@@ -380,6 +380,30 @@
     ok(r2.nextDate === '2099-02-15' && r2.count === 1, 'تقديم الاستحقاق التالي وزيادة العدّاد');
   })();
 
+  /* 33) المشاريع وساعات العمل */
+  (function () {
+    const cl = DB.upsert('partners', { name: 'عميل مشروع', kind: 'customer' });
+    const emp = DB.upsert('employees', { name: 'مهندس', salary: 5000 });
+    const pj = DB.upsert('projects', { name: 'موقع إلكتروني', partnerId: cl.id, status: 'active', budget: 10000, startDate: todayISO() });
+    DB.upsert('timesheets', { projectId: pj.id, employeeId: emp.id, date: todayISO(), hours: 10, rate: 150 });
+    DB.upsert('timesheets', { projectId: pj.id, employeeId: emp.id, date: todayISO(), hours: 5, rate: 200 });
+    eq(projectHours(pj.id), 15, 'إجمالي ساعات المشروع');
+    eq(projectBillable(pj.id), 2500, 'المبلغ القابل للفوترة (10×150 + 5×200)');
+    const before = DB.list('sales').length;
+    const so = createInvoiceFromProject(pj.id);
+    ok(DB.list('sales').length === before + 1 && so.status === 'draft', 'إنشاء فاتورة من المشروع');
+    eq(docTotals(so).subtotal, 2500, 'إجمالي فاتورة المشروع = القابل للفوترة');
+    ok(typeof Views.projects() === 'string', 'تصيير شاشة المشاريع');
+  })();
+
+  /* 34) التسوية البنكية: تحليل ومطابقة كشف الحساب */
+  (function () {
+    ok(parseStatementRow(['2099-03-01', 'إيداع عميل', '1500']).amount === 1500, 'تحليل سطر كشف (مبلغ موجب)');
+    ok(parseStatementRow(['2099-03-02', 'سحب', '-300']).amount === -300, 'تحليل سطر كشف (مبلغ سالب)');
+    const r = parseStatementRow(['2099-03-01', 'وصف', '1500']);
+    ok(r.date === '2099-03-01' && r.desc === 'وصف', 'استخراج التاريخ والوصف');
+  })();
+
   /* --- النتيجة --- */
   console.log(`\nنتيجة الاختبارات: ${pass} ناجح، ${fail} فاشل`);
   if (fail) { fails.forEach(f => console.log('  ❌ ' + f)); process.exitCode = 1; }
