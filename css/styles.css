@@ -448,6 +448,18 @@ body.dark .card-actions button:active { background: #342d42; }
 .audit-row .title { font-size: .95rem; }
 body.dark .perm-cell { background: var(--card); }
 
+/* ===== شريط التقدّم (الأصول/الموازنات) ===== */
+.progress {
+  height: 8px; border-radius: 999px; background: var(--border);
+  overflow: hidden; margin: 8px 0 4px;
+}
+.progress-bar {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), var(--info));
+  transition: width .3s ease;
+}
+.progress-bar.over { background: linear-gradient(90deg, #f59e0b, var(--danger)); }
+
 /* ===== شاشات أكبر ===== */
 @media (min-width: 720px) {
   .stat-grid { grid-template-columns: repeat(3, 1fr); }

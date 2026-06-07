@@ -263,6 +263,60 @@
     App.govTab = tab; try { ok(typeof Views.governance() === 'string', 'تبويب حوكمة ' + tab); } catch (e) { ok(false, 'تبويب حوكمة ' + tab + ': ' + e.message); }
   }
 
+  /* 25) الأصول الثابتة والإهلاك */
+  (function () {
+    const acqMonth = '2099-01';
+    const a = DB.upsert('assets', { name: 'سيارة اختبار', cost: 12000, salvage: 0, life: 12, date: acqMonth + '-01' });
+    eq(assetMonthlyDep(a), 1000, 'القسط الشهري بالقسط الثابت');
+    const beforeJE = DB.list('journal').length;
+    runDepreciation(acqMonth);
+    ok(DB.list('journal').length === beforeJE + 1, 'ترحيل قيد إهلاك');
+    eq(assetAccumulated(DB.get('assets', a.id)), 1000, 'مجمع الإهلاك بعد شهر');
+    eq(assetNBV(DB.get('assets', a.id)), 11000, 'صافي القيمة الدفترية');
+    runDepreciation(acqMonth);   // نفس الشهر مجدداً
+    ok(DB.get('assets', a.id).deps.length === 1, 'لا تكرار إهلاك لنفس الشهر');
+    // تشغيل أشهر كافية: لا يتجاوز الإهلاك القيمة القابلة
+    let y = 2099, mo = 2;
+    for (let i = 0; i < 18; i++) { runDepreciation(`${y}-${String(mo).padStart(2, '0')}`); if (++mo > 12) { mo = 1; y++; } }
+    const af = DB.get('assets', a.id);
+    eq(assetAccumulated(af), 12000, 'الإهلاك يتوقف عند القيمة القابلة');
+    eq(assetNBV(af), 0, 'صافي القيمة الدفترية = صفر بعد الاكتمال');
+    ok(af.deps.length === 12 && assetFullyDepreciated(af), 'العمر الإنتاجي 12 شهراً بالضبط');
+  })();
+
+  /* 26) تخطيط إعادة الطلب */
+  (function () {
+    const lp = DB.upsert('products', { name: 'صنف منخفض', type: 'stock', cost: 10, qty: 1, minQty: 5 });
+    const items = reorderItems();
+    const it = items.find(x => x.p.id === lp.id);
+    ok(!!it, 'المنتج تحت الحدّ يظهر في إعادة الطلب');
+    eq(it.suggest, 9, 'الكمية المقترحة = (٢×الحدّ) − المتوفر');
+    DB.upsert('partners', { name: 'مورد إعادة طلب', kind: 'vendor' });
+    const beforePO = DB.list('purchases').length;
+    createReorderPO();
+    ok(DB.list('purchases').length === beforePO + 1, 'إنشاء أمر شراء إعادة الطلب');
+    const po = DB.list('purchases').slice().sort((x, y) => (y.createdAt || 0) - (x.createdAt || 0))[0];
+    ok(po.status === 'draft' && po.lines.length >= 1, 'أمر الشراء مسودة وبه بنود');
+  })();
+
+  /* 27) أعمار الذمم */
+  (function () {
+    App.acctTab = 'aging';
+    const html = Views.accounting();
+    ok(typeof html === 'string' && html.indexOf('ذمم مدينة') >= 0, 'تصيير تقرير أعمار الذمم');
+  })();
+
+  /* 28) الموازنات التقديرية */
+  (function () {
+    const inc = DB.get('accounts', Acct.id('sales'));
+    DB.data.settings.budgets = DB.data.settings.budgets || {};
+    DB.data.settings.budgets[inc.id] = 1000;
+    App.acctTab = 'budget';
+    const html = Views.accounting();
+    ok(typeof html === 'string' && html.indexOf('الموازنات') >= 0, 'تصيير تقرير الموازنات');
+    ok(typeof Views.assets() === 'string', 'تصيير شاشة الأصول');
+  })();
+
   /* --- النتيجة --- */
   console.log(`\nنتيجة الاختبارات: ${pass} ناجح، ${fail} فاشل`);
   if (fail) { fails.forEach(f => console.log('  ❌ ' + f)); process.exitCode = 1; }

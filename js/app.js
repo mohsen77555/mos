@@ -35,6 +35,7 @@ const DB = {
       posSessions: [],// ورديات نقطة البيع
       leaves: [],     // إجازات الموظفين
       audit: [],      // سجل التدقيق (الحوكمة)
+      assets: [],     // الأصول الثابتة (الإهلاك)
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
@@ -53,6 +54,7 @@ const DB = {
         reconciled: {},          // أسطر القيود المسوّاة بنكياً { journalId: true }
         approval: { enabled: false, threshold: 5000 },  // دورة الاعتماد (الحوكمة)
         perms: {},               // تجاوزات الصلاحيات الدقيقة لكل دور { role: {create,edit,delete,approve} }
+        budgets: {},             // الموازنات التقديرية { accountId: amount }
       },
     };
   },
@@ -267,7 +269,7 @@ const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales:
 /* التطبيقات المسموحة لكل دور */
 const ROLE_APPS = {
   admin: '*',
-  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'reports', 'governance', 'guide'],
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'assets', 'reports', 'governance', 'guide'],
   sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'guide'],
   viewer: ['dashboard', 'reports', 'guide'],
 };
@@ -373,6 +375,7 @@ const AUDIT_ACTIONS = {
   create: 'إضافة', update: 'تعديل', delete: 'حذف', confirm: 'تأكيد', cancel: 'إلغاء',
   pay: 'دفعة', return: 'مرتجع', voucher: 'سند', approve: 'اعتماد', reject: 'رفض',
   request: 'طلب اعتماد', login: 'دخول', logout: 'خروج', demo: 'بيانات تجريبية', reset: 'تصفير',
+  depreciation: 'إهلاك',
 };
 
 /* ---------------------------------------------------------------------
@@ -416,6 +419,8 @@ const DEFAULT_ACCOUNTS = [
   { code: '5010', name: 'تكلفة البضاعة المباعة', type: 'expense', role: 'cogs' },
   { code: '5020', name: 'مصروف المشتريات والخدمات', type: 'expense', role: 'purchases' },
   { code: '5030', name: 'الرواتب والأجور', type: 'expense', role: 'salaries' },
+  { code: '1590', name: 'مجمع إهلاك الأصول الثابتة', type: 'asset', role: 'accumDep' },
+  { code: '5040', name: 'مصروف الإهلاك', type: 'expense', role: 'depExpense' },
   { code: '5900', name: 'مصروفات عامة', type: 'expense', role: 'expense' },
   { code: '5950', name: 'خسائر فروقات أسعار الصرف', type: 'expense', role: 'fxLoss' },
 ];
@@ -712,6 +717,19 @@ const Models = {
     ],
   },
 
+  assets: {
+    label: 'أصل ثابت', plural: 'الأصول الثابتة', icon: '🏛️', color: '#8d6e63', menu: false,
+    fields: [
+      { name: 'name', label: 'اسم الأصل *', type: 'text', required: true },
+      { name: 'category', label: 'الفئة', type: 'select', options: ['مباني', 'سيارات', 'أثاث', 'أجهزة وحواسيب', 'معدات', 'أخرى'], default: 'معدات' },
+      { name: 'cost', label: 'التكلفة *', type: 'number', default: 0, required: true },
+      { name: 'salvage', label: 'القيمة التخريدية (المتبقية)', type: 'number', default: 0 },
+      { name: 'life', label: 'العمر الإنتاجي (بالأشهر) *', type: 'number', default: 60, required: true },
+      { name: 'date', label: 'تاريخ الاقتناء', type: 'date', default: () => todayISO() },
+      { name: 'note', label: 'ملاحظات', type: 'textarea' },
+    ],
+  },
+
   employees: {
     label: 'موظف', plural: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14', menu: true,
     title: r => r.name,
@@ -777,6 +795,7 @@ const APPS = [
   { route: 'accounting', label: 'المحاسبة', icon: '🧮', color: '#dc3545' },
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
   { route: 'payroll', label: 'الرواتب', icon: '💵', color: '#e83e8c' },
+  { route: 'assets', label: 'الأصول الثابتة', icon: '🏛️', color: '#8d6e63' },
   { route: 'reports', label: 'التقارير', icon: '📈', color: '#6f42c1' },
   { route: 'governance', label: 'الحوكمة والامتثال', icon: '🛡️', color: '#5b21b6' },
   { route: 'guide', label: 'دليل الاستخدام', icon: '❓', color: '#607d8b' },
@@ -803,7 +822,7 @@ const App = {
   govTab: 'compliance',  // تبويب الحوكمة (الامتثال/الاعتمادات/سجل التدقيق)
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
-  fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1 },
+  fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1, assets: 1 },
 
   go(route) {
     if (!Auth.user) { showLogin(); return; }
@@ -1197,6 +1216,82 @@ function registerPayment(coll, id, amount, method, payRate) {
 }
 
 /* ---------------------------------------------------------------------
+   7ج) الأصول الثابتة والإهلاك (بالقسط الثابت)
+   --------------------------------------------------------------------- */
+/* الإهلاك الشهري للأصل = (التكلفة − القيمة التخريدية) ÷ العمر بالأشهر */
+function assetMonthlyDep(a) {
+  const base = Math.max(0, num(a.cost) - num(a.salvage));
+  const life = Math.max(1, Math.round(num(a.life)));
+  return +(base / life).toFixed(2);
+}
+function assetAccumulated(a) { return +(a.deps || []).reduce((s, d) => s + num(d.amount), 0).toFixed(2); }
+function assetNBV(a) { return +(num(a.cost) - assetAccumulated(a)).toFixed(2); }
+function assetDepreciable(a) { return Math.max(0, num(a.cost) - num(a.salvage)); }
+function assetFullyDepreciated(a) { return assetAccumulated(a) >= assetDepreciable(a) - 0.005; }
+
+/* ترحيل إهلاك شهر محدد (YYYY-MM) لكل الأصول المؤهَّلة */
+function runDepreciation(month) {
+  if (lockedToast(month + '-28')) return;
+  let posted = 0, total = 0;
+  DB.list('assets').forEach(a => {
+    if (a.date && a.date.slice(0, 7) > month) return;          // قبل الاقتناء
+    if ((a.deps || []).some(d => d.month === month)) return;    // مُرحَّل مسبقاً لهذا الشهر
+    if (assetFullyDepreciated(a)) return;
+    let amt = assetMonthlyDep(a);
+    const remaining = +(assetDepreciable(a) - assetAccumulated(a)).toFixed(2);
+    if (amt > remaining) amt = remaining;                       // القسط الأخير
+    if (amt <= 0) return;
+    const ok = Acct.post({
+      date: month + '-28',
+      narration: `إهلاك ${a.name} — ${month}`,
+      source: 'depreciation', sourceId: a.id, docId: a.id,
+      lines: [
+        { accountId: Acct.id('depExpense'), debit: amt, credit: 0 },
+        { accountId: Acct.id('accumDep'), debit: 0, credit: amt },
+      ],
+    });
+    if (ok) {
+      a.deps = a.deps || [];
+      a.deps.push({ month, amount: amt, at: Date.now() });
+      DB.upsert('assets', a);
+      posted++; total += amt;
+    }
+  });
+  Audit.log('depreciation', 'assets', month, `${posted} أصل — ${fmtMoney(total)}`);
+  toast(posted ? `تم ترحيل إهلاك ${posted} أصل (${fmtMoney(total)}) ✅` : 'لا يوجد إهلاك مستحق لهذا الشهر');
+}
+
+/* ---------------------------------------------------------------------
+   7د) تخطيط إعادة الطلب (Reorder) — اقتراح شراء + أمر شراء بنقرة
+   --------------------------------------------------------------------- */
+/* المنتجات تحت حدّ إعادة الطلب مع الكمية المقترحة (الرفع إلى ضعف الحدّ) */
+function reorderItems() {
+  return DB.list('products')
+    .filter(p => p.type !== 'service' && num(p.minQty) > 0 && num(p.qty) < num(p.minQty))
+    .map(p => {
+      const target = num(p.minQty) * 2;                 // «الرفع إلى» = ضعف نقطة إعادة الطلب
+      const suggest = Math.max(1, Math.ceil(target - num(p.qty)));
+      return { p, suggest };
+    });
+}
+/* إنشاء أمر شراء مسودة بكل المنتجات المقترحة */
+function createReorderPO() {
+  const items = reorderItems();
+  if (!items.length) { toast('لا توجد منتجات تحت حدّ إعادة الطلب'); return; }
+  const vendor = DB.list('partners').find(p => p.kind === 'vendor' || p.kind === 'both');
+  if (!vendor) { toast('أضِف مورّداً أولاً من جهات الاتصال'); return; }
+  const po = DB.upsert('purchases', {
+    ref: DB.nextRef('PO'), partnerId: vendor.id, date: todayISO(), status: 'draft',
+    paid: 0, currency: 'BASE', rate: 1,
+    note: 'أمر شراء تلقائي — تخطيط إعادة الطلب',
+    lines: items.map(({ p, suggest }) => ({ productId: p.id, name: p.name, qty: suggest, price: num(p.cost) })),
+  });
+  Audit.log('create', 'purchases', po.ref, `إعادة طلب تلقائي — ${items.length} صنف`);
+  toast(`تم إنشاء أمر شراء بـ ${items.length} صنف ✅`);
+  App.go('purchases');
+}
+
+/* ---------------------------------------------------------------------
    8) العروض (Views)
    --------------------------------------------------------------------- */
 const Views = {
@@ -1295,6 +1390,19 @@ const Views = {
     html += `<div class="card" style="display:flex;gap:8px;justify-content:space-between;align-items:center">
       <div class="meta">إجمالي المنتجات المخزنية: <b>${products.length}</b></div>
       <button class="mini-btn" data-adjust="new">＋ تسوية مخزون</button></div>`;
+
+    // تخطيط إعادة الطلب: المنتجات تحت الحدّ + اقتراح شراء
+    const reorder = reorderItems();
+    if (reorder.length) {
+      html += `<div class="card warn-card" style="padding:0;overflow:hidden">
+        <div style="padding:12px 14px"><b>🔁 تخطيط إعادة الطلب</b> — ${reorder.length} منتج تحت حدّ إعادة الطلب:</div>
+        <table class="acct-table"><thead><tr><th>المنتج</th><th>المتوفر</th><th>الحدّ</th><th>المقترح شراؤه</th></tr></thead>
+        <tbody>${reorder.map(({ p, suggest }) => `<tr>
+          <td>${esc(p.name)}</td><td>${fmtQty(p.qty)}</td><td>${fmtQty(p.minQty)}</td><td><b>${fmtQty(suggest)}</b></td>
+        </tr>`).join('')}</tbody></table>
+        <div style="padding:12px 14px"><button class="mini-btn" id="reorderPoBtn">🛒 إنشاء أمر شراء مقترح</button></div>
+      </div>`;
+    }
     if (!items.length) return html + emptyState('🏭', 'لا توجد منتجات مخزنية', 'أضِف منتجات من تطبيق «المنتجات».');
 
     const whs = DB.data.settings.warehouses || [];
@@ -1363,7 +1471,8 @@ const Views = {
   accounting() {
     const tabs = [
       ['accounts', 'شجرة الحسابات'], ['journal', 'القيود'], ['trial', 'ميزان المراجعة'],
-      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'], ['vat', 'ضريبة VAT'], ['close', 'الإقفال'],
+      ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'],
+      ['aging', 'أعمار الذمم'], ['budget', 'الموازنات'], ['vat', 'ضريبة VAT'], ['close', 'الإقفال'],
     ];
     let html = `<div class="acct-tabs">` + tabs.map(([k, l]) =>
       `<button class="acct-tab ${App.acctTab === k ? 'active' : ''}" data-actab="${k}">${l}</button>`).join('') + `</div>`;
@@ -1552,6 +1661,48 @@ const Views = {
   },
 
   /* ===== دليل الاستخدام ===== */
+  /* ===== الأصول الثابتة والإهلاك ===== */
+  assets() {
+    if (!App.depMonth) App.depMonth = todayISO().slice(0, 7);
+    const list = DB.list('assets').slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const totalCost = list.reduce((s, a) => s + num(a.cost), 0);
+    const totalAccum = list.reduce((s, a) => s + assetAccumulated(a), 0);
+    const totalNBV = list.reduce((s, a) => s + assetNBV(a), 0);
+    let html = `<div class="card">
+      <div class="field" style="margin-bottom:8px"><label>شهر الإهلاك</label>
+        <input type="month" id="depMonth" value="${App.depMonth}"/></div>
+      <button class="mini-btn" id="runDepBtn">▶️ ترحيل إهلاك الشهر</button>
+      <div class="meta" style="margin-top:8px">يُرحَّل قسط الشهر لكل أصل مؤهَّل: من ح/ مصروف الإهلاك — إلى ح/ مجمع الإهلاك (لا تكرار لنفس الشهر).</div>
+    </div>`;
+    html += `<div class="stat-grid">
+      <div class="stat-card" style="--c:#8d6e63"><span class="ico">💰</span><div class="num">${fmtMoney(totalCost)}</div><div class="lbl">إجمالي التكلفة</div></div>
+      <div class="stat-card" style="--c:#dc3545"><span class="ico">📉</span><div class="num">${fmtMoney(totalAccum)}</div><div class="lbl">مجمع الإهلاك</div></div>
+      <div class="stat-card" style="--c:#198754"><span class="ico">🏛️</span><div class="num">${fmtMoney(totalNBV)}</div><div class="lbl">صافي القيمة الدفترية</div></div>
+    </div>`;
+    if (!list.length) return html + emptyState('🏛️', 'لا توجد أصول ثابتة', 'اضغط «＋» لتسجيل أصل ثابت.');
+    list.forEach(a => {
+      const accum = assetAccumulated(a), nbv = assetNBV(a), monthly = assetMonthlyDep(a);
+      const dep = assetDepreciable(a);
+      const pct = dep > 0 ? Math.min(100, Math.round(accum / dep * 100)) : 100;
+      const done = assetFullyDepreciated(a);
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(a.name)} ${a.category ? `<span class="badge muted">${esc(a.category)}</span>` : ''}</div>
+          <div class="meta">التكلفة: <b>${fmtMoney(a.cost)}</b> • العمر: ${num(a.life)} شهراً • القسط الشهري: <b>${fmtMoney(monthly)}</b></div>
+          <div class="meta">الاقتناء: ${fmtDate(a.date)} • أُهلِك ${(a.deps || []).length} شهراً</div>
+        </div><div style="text-align:left">
+          <span class="badge ${done ? 'ok' : 'info'}">${done ? 'مُهلَك بالكامل' : 'صافي ' + fmtMoney(nbv)}</span>
+          <div class="meta" style="margin-top:6px">مجمع: ${fmtMoney(accum)}</div>
+        </div></div>
+        <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
+        <div class="meta" style="text-align:center">${pct}% من القيمة القابلة للإهلاك</div>
+        <div class="card-actions">
+          <button data-edit="assets:${a.id}">✏️ تعديل</button>
+          <button class="del" data-del="assets:${a.id}">🗑️ حذف</button>
+        </div></div>`;
+    });
+    return html;
+  },
+
   /* ===== الحوكمة والامتثال ===== */
   governance() {
     const tabs = [
@@ -2143,6 +2294,73 @@ const AcctViews = {
       </div>
       <div class="card warn-card" style="${balanced ? 'background:#e9f7ef;border-color:#bfe3cd;color:#1e7e4d' : ''}">
         ${balanced ? '✅ الميزانية متوازنة.' : '⚠️ غير متوازنة — تحقق من الأرصدة الافتتاحية والقيود اليدوية.'}</div>`;
+  },
+
+  /* تقرير أعمار الذمم (مدينة ودائنة) */
+  aging() {
+    const today = todayISO();
+    const buckets = ['0–30', '31–60', '61–90', '+90'];
+    const bucketOf = date => { const d = govDays(date, today); return d <= 30 ? 0 : d <= 60 ? 1 : d <= 90 ? 2 : 3; };
+    const build = (coll, partyLabel) => {
+      const map = {};   // partnerId → [b0,b1,b2,b3]
+      DB.list(coll).filter(d => d.status === 'confirmed').forEach(d => {
+        const due = toBase(docTotals(d).due, d);
+        if (due <= 0.005) return;
+        const pid = d.partnerId || '—';
+        if (!map[pid]) map[pid] = [0, 0, 0, 0];
+        map[pid][bucketOf(d.date || today)] += due;
+      });
+      const ids = Object.keys(map);
+      const totals = [0, 0, 0, 0];
+      ids.forEach(id => map[id].forEach((v, i) => totals[i] += v));
+      const grand = totals.reduce((s, v) => s + v, 0);
+      let rows = ids.map(id => {
+        const r = map[id], t = r.reduce((s, v) => s + v, 0);
+        return `<tr><td>${esc(partnerName(id))}</td>${r.map(v => `<td>${v ? fmtMoney(v) : '—'}</td>`).join('')}<td><b>${fmtMoney(t)}</b></td></tr>`;
+      }).join('');
+      if (!ids.length) rows = `<tr><td colspan="6" style="text-align:center;color:var(--muted)">لا توجد ذمم</td></tr>`;
+      return `<div class="section-title">${partyLabel} <span class="muted-text">(${fmtMoney(grand)})</span></div>
+        <div class="card acct-table-wrap"><table class="acct-table">
+          <thead><tr><th>الطرف</th>${buckets.map(b => `<th>${b}</th>`).join('')}<th>الإجمالي</th></tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot><tr><td>الإجمالي</td>${totals.map(v => `<td>${fmtMoney(v)}</td>`).join('')}<td>${fmtMoney(grand)}</td></tr></tfoot>
+        </table></div>`;
+    };
+    return `<div class="muted-text" style="margin-bottom:10px">تصنيف الذمم غير المسدَّدة حسب عمر الفاتورة (بالأيام، بالعملة الأساسية).</div>`
+      + build('sales', '🟢 ذمم مدينة (العملاء)') + build('purchases', '🔴 ذمم دائنة (الموردون)');
+  },
+
+  /* الموازنات التقديرية مقابل الفعلي */
+  budget() {
+    const s = DB.data.settings; s.budgets = s.budgets || {};
+    const accs = DB.list('accounts').filter(a => a.type === 'income' || a.type === 'expense').sort(byCode);
+    let html = `<div class="muted-text" style="margin-bottom:10px">حدِّد موازنة كل حساب إيراد/مصروف، وقارنها بالفعلي ونسبة الإنجاز.</div>`;
+    let tBudget = 0, tActual = 0;
+    const groups = [['income', 'الإيرادات'], ['expense', 'المصروفات']];
+    groups.forEach(([type, lbl]) => {
+      const group = accs.filter(a => a.type === type);
+      if (!group.length) return;
+      html += `<div class="section-title">${lbl}</div>`;
+      group.forEach(a => {
+        const bud = num(s.budgets[a.id]);
+        const act = Math.abs(Acct.balance(a));
+        tBudget += bud; tActual += act;
+        const pct = bud > 0 ? Math.round(act / bud * 100) : 0;
+        const over = bud > 0 && act > bud;
+        html += `<div class="card"><div class="row"><div>
+            <div class="title">${esc(a.name)}</div>
+            <div class="meta">الفعلي: <b>${fmtMoney(act)}</b>${bud > 0 ? ` • ${pct}% من الموازنة` : ''}</div>
+          </div><div class="field" style="margin:0;width:130px">
+            <input type="number" inputmode="decimal" step="any" min="0" data-budget="${a.id}" value="${bud || ''}" placeholder="الموازنة"/>
+          </div></div>
+          ${bud > 0 ? `<div class="progress"><div class="progress-bar ${over ? 'over' : ''}" style="width:${Math.min(100, pct)}%"></div></div>` : ''}
+        </div>`;
+      });
+    });
+    html += `<div class="card report-table" style="border:2px solid var(--primary)">
+      ${reportRow('إجمالي الموازنات', fmtMoney(tBudget))}
+      ${reportRow('إجمالي الفعلي', fmtMoney(tActual), true)}</div>`;
+    return html;
   },
 
   /* تقرير ضريبة القيمة المضافة (إقرار VAT) */
@@ -3346,6 +3564,7 @@ function bindViewEvents() {
     if (!Perm.can('delete', App.route)) { toast('لا تملك صلاحية الحذف'); return; }
     if (confirm('هل تريد الحذف نهائياً؟')) {
       const rec = DB.get(c, i);
+      if (c === 'assets') Acct.removeByDoc(i);   // عكس قيود الإهلاك المرتبطة
       DB.remove(c, i);
       Audit.log('delete', c, rec ? (rec.ref || rec.name || rec.code || '') : '');
       toast('تم الحذف'); App.render();
@@ -3354,6 +3573,22 @@ function bindViewEvents() {
   on('[data-approve]', 'click', b => { const [c, i] = b.dataset.approve.split(':'); approveDoc(c, i); App.render(); });
   on('[data-reject]', 'click', b => { const [c, i] = b.dataset.reject.split(':'); if (confirm('رفض هذا المستند؟')) { rejectDoc(c, i); App.render(); } });
   on('[data-govtab]', 'click', b => { App.govTab = b.dataset.govtab; App.render(); });
+  // الأصول الثابتة: ترحيل الإهلاك
+  const depMonth = document.getElementById('depMonth');
+  if (depMonth) depMonth.onchange = () => { App.depMonth = depMonth.value; App.render(); };
+  const runDep = document.getElementById('runDepBtn');
+  if (runDep) runDep.onclick = () => { runDepreciation(App.depMonth || todayISO().slice(0, 7)); App.render(); };
+  // تخطيط إعادة الطلب: إنشاء أمر شراء
+  const reorderBtn = document.getElementById('reorderPoBtn');
+  if (reorderBtn) reorderBtn.onclick = () => createReorderPO();
+  // الموازنات: تعديل قيمة موازنة حساب
+  on('[data-budget]', 'change', b => {
+    const s = DB.data.settings;
+    s.budgets = s.budgets || {};
+    const v = num(b.value);
+    if (v) s.budgets[b.dataset.budget] = v; else delete s.budgets[b.dataset.budget];
+    DB.save();
+  });
   on('[data-perm]', 'change', b => {
     if (!Auth.isAdmin()) { toast('تعديل الصلاحيات للمدير فقط'); b.checked = !b.checked; return; }
     const [role, cap] = b.dataset.perm.split(':');
