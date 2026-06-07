@@ -346,6 +346,40 @@
     ok(html.indexOf('هامش الربح الإجمالي') >= 0 && html.indexOf('دوران المخزون') >= 0, 'وجود نسب الربحية والنشاط');
   })();
 
+  /* 31) الخصومات على البنود */
+  (function () {
+    const c = DB.upsert('partners', { name: 'عميل خصم', kind: 'customer' });
+    const pr = DB.upsert('products', { name: 'سلعة خصم', type: 'stock', salePrice: 100, cost: 60, qty: 100 });
+    const d = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: pr.id, qty: 2, price: 100, disc: 10 }] });
+    const t = docTotals(d);
+    eq(t.discount, 20, 'إجمالي الخصم (10% من 200)');
+    eq(t.subtotal, 180, 'المجموع الفرعي بعد الخصم');
+    eq(t.tax, 27, 'الضريبة على الصافي');
+    eq(t.total, 207, 'الإجمالي بعد الخصم');
+    eq(lineNet({ qty: 2, price: 100, disc: 10 }), 180, 'صافي البند بعد الخصم');
+    const arB = bal('ar'), salesB = bal('sales');
+    confirmDoc('sales', d.id);
+    eq(bal('ar') - arB, 207, 'العملاء يساوي الإجمالي بعد الخصم');
+    eq(bal('sales') - salesB, 180, 'الإيراد يساوي الصافي بعد الخصم');
+  })();
+
+  /* 32) الفواتير المتكرّرة (الاشتراكات) */
+  (function () {
+    ok(addMonths('2099-01-31', 1) === '2099-02-28', 'addMonths يحافظ على آخر الشهر');
+    ok(addMonths('2099-01-15', 3) === '2099-04-15', 'addMonths ربع سنوي (+3 أشهر)');
+    const c = DB.upsert('partners', { name: 'عميل اشتراك', kind: 'customer' });
+    const pr = DB.upsert('products', { name: 'خدمة اشتراك', type: 'service', salePrice: 300, cost: 0 });
+    const src = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: pr.id, qty: 1, price: 300, disc: 0 }] });
+    const rec = createRecurringFromSale(src.id, 'month', '2099-01-15');
+    ok(rec && rec.nextDate === '2099-01-15' && rec.active, 'إنشاء اشتراك من أمر بيع');
+    const before = DB.list('sales').length;
+    const gen = generateRecurring(DB.get('recurrings', rec.id));
+    ok(DB.list('sales').length === before + 1 && gen.status === 'draft', 'توليد أمر بيع مسودة من الاشتراك');
+    ok(gen.lines.length === 1 && num(gen.lines[0].price) === 300, 'نسخ بنود الاشتراك');
+    const r2 = DB.get('recurrings', rec.id);
+    ok(r2.nextDate === '2099-02-15' && r2.count === 1, 'تقديم الاستحقاق التالي وزيادة العدّاد');
+  })();
+
   /* --- النتيجة --- */
   console.log(`\nنتيجة الاختبارات: ${pass} ناجح، ${fail} فاشل`);
   if (fail) { fails.forEach(f => console.log('  ❌ ' + f)); process.exitCode = 1; }

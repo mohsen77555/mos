@@ -266,7 +266,7 @@ body.dark .num-big { color: #e7c6db; }
 .lines-editor { border: 1px solid var(--border); border-radius: 12px; padding: 10px; margin-bottom: 14px; background: #fafafc; }
 .lines-head { display: flex; justify-content: space-between; align-items: center; font-weight: 700; margin-bottom: 8px; }
 .line-edit {
-  display: grid; grid-template-columns: 1fr 64px 76px 32px;
+  display: grid; grid-template-columns: 1fr 54px 68px 50px 30px;
   gap: 6px; margin-bottom: 8px; align-items: center;
 }
 .line-edit select, .line-edit input { padding: 8px; font-size: .85rem; border: 1px solid var(--border); border-radius: 8px; background: #fff; }

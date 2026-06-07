@@ -36,6 +36,7 @@ const DB = {
       leaves: [],     // إجازات الموظفين
       audit: [],      // سجل التدقيق (الحوكمة)
       assets: [],     // الأصول الثابتة (الإهلاك)
+      recurrings: [], // الفواتير المتكرّرة (الاشتراكات)
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
@@ -270,8 +271,8 @@ const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales:
 /* التطبيقات المسموحة لكل دور */
 const ROLE_APPS = {
   admin: '*',
-  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'assets', 'reports', 'governance', 'guide'],
-  sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'guide'],
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'subscriptions', 'treasury', 'accounting', 'payroll', 'assets', 'reports', 'governance', 'guide'],
+  sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'subscriptions', 'guide'],
   viewer: ['dashboard', 'reports', 'guide'],
 };
 
@@ -531,7 +532,7 @@ function postDocConfirm(coll, doc) {
     let stockSub = 0, svcSub = 0;
     (doc.lines || []).forEach(l => {
       const p = DB.get('products', l.productId);
-      const amt = toBase(num(l.qty) * num(l.price), doc);
+      const amt = toBase(lineNet(l), doc);
       if (p && p.type !== 'service') stockSub += amt; else svcSub += amt;
     });
     if (stockSub > 0) lines.push({ accountId: Acct.id('inventory'), debit: +stockSub.toFixed(2), credit: 0 });
@@ -801,6 +802,7 @@ const APPS = [
   { route: 'inventory', label: 'المخزون', icon: '🏭', color: '#0dcaf0' },
   { route: 'manufacturing', label: 'التصنيع', icon: '🏗️', color: '#795548' },
   { route: 'invoicing', label: 'الفوترة والمدفوعات', icon: '💳', color: '#20c997' },
+  { route: 'subscriptions', label: 'الفواتير المتكرّرة', icon: '🔁', color: '#0ea5e9' },
   { route: 'treasury', label: 'الخزينة', icon: '🏦', color: '#0d9488' },
   { route: 'accounting', label: 'المحاسبة', icon: '🧮', color: '#dc3545' },
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
@@ -868,13 +870,21 @@ function updateFab() {
    --------------------------------------------------------------------- */
 function docTotals(doc) {
   const taxRate = num(DB.data.settings.taxRate) / 100;
-  let subtotal = 0;
-  (doc.lines || []).forEach(l => { subtotal += num(l.qty) * num(l.price); });
+  let subtotal = 0, discount = 0;
+  (doc.lines || []).forEach(l => {
+    const gross = num(l.qty) * num(l.price);
+    discount += gross * num(l.disc) / 100;
+    subtotal += gross * (1 - num(l.disc) / 100);
+  });
   const tax = +(subtotal * taxRate).toFixed(2);
   const total = +(subtotal + tax).toFixed(2);
   const paid = num(doc.paid);
-  return { subtotal: +subtotal.toFixed(2), tax, total, paid, due: +(total - paid).toFixed(2) };
+  return { subtotal: +subtotal.toFixed(2), discount: +discount.toFixed(2), tax, total, paid, due: +(total - paid).toFixed(2) };
 }
+/* صافي البند بعد الخصم (للعرض والترحيل) */
+function lineNet(l) { return +(num(l.qty) * num(l.price) * (1 - num(l.disc) / 100)).toFixed(2); }
+/* سعر الوحدة بعد الخصم (لتقييم المخزون) */
+function lineUnitNet(l) { return +(num(l.price) * (1 - num(l.disc) / 100)).toFixed(4); }
 
 /* إجمالي رصيد العميل المستحق (ذمم مدينة) بالعملة الأساسية */
 function partnerOutstanding(partnerId, exceptDocId) {
@@ -932,7 +942,7 @@ function confirmDoc(coll, id) {
         // تقييم المخزون بالمتوسط المرجّح عند الشراء
         const oldQty = num(p.qty), oldCost = num(p.cost);
         const addQty = num(l.qty);
-        const unitBase = toBase(num(l.price), doc);     // سعر الشراء للوحدة بالعملة الأساسية
+        const unitBase = toBase(lineUnitNet(l), doc);   // سعر الوحدة بعد الخصم بالعملة الأساسية
         const newQty = oldQty + addQty;
         p.cost = newQty > 0 ? +(((oldQty * oldCost) + (addQty * unitBase)) / newQty).toFixed(4) : unitBase;
         p.qty = newQty;
@@ -1049,7 +1059,7 @@ function createReturn(coll, id) {
     let stockSub = 0, svcSub = 0;
     (doc.lines || []).forEach(l => {
       const p = DB.get('products', l.productId);
-      const amt = toBase(num(l.qty) * num(l.price), doc);
+      const amt = toBase(lineNet(l), doc);
       if (p && p.type !== 'service') stockSub += amt; else svcSub += amt;
     });
     lines.push({ accountId: Acct.id('ap'), debit: toBase(t.total, doc), credit: 0 });
@@ -1129,6 +1139,28 @@ function openVoucherDialog(type) {
     if (isTransfer) { v.fromRole = fd.get('fromRole'); v.toRole = fd.get('toRole'); }
     else { v.method = fd.get('method'); v.counterAccount = fd.get('counterAccount'); }
     if (postVoucher(v)) { closeForm(); document.getElementById('modalForm').onsubmit = submitForm; App.render(); }
+  };
+}
+
+/* حوار إنشاء فاتورة متكرّرة من أمر بيع */
+function openSubscribeDialog(saleId) {
+  const sale = DB.get('sales', saleId);
+  if (!sale) return;
+  document.getElementById('modalTitle').textContent = 'فاتورة متكرّرة — ' + (sale.ref || '');
+  document.getElementById('modalForm').innerHTML = `
+    <div class="field"><label>التكرار</label><select name="every">
+      <option value="month">شهري</option><option value="quarter">ربع سنوي</option><option value="year">سنوي</option></select></div>
+    <div class="field"><label>تاريخ أول استحقاق</label><input name="start" type="date" value="${todayISO()}" required /></div>
+    <div class="meta">سيُنسخ العميل والبنود (مع الخصومات) من ${esc(sale.ref || '')}، وتُولَّد أوامر بيع مسودة عند كل استحقاق.</div>
+    <button type="submit" class="btn-primary">إنشاء الاشتراك</button>`;
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('modalForm').onsubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    createRecurringFromSale(saleId, fd.get('every'), fd.get('start'));
+    closeForm();
+    document.getElementById('modalForm').onsubmit = submitForm;
+    App.go('subscriptions');
   };
 }
 
@@ -1327,6 +1359,69 @@ function createReorderPO() {
   Audit.log('create', 'purchases', po.ref, `إعادة طلب تلقائي — ${items.length} صنف`);
   toast(`تم إنشاء أمر شراء بـ ${items.length} صنف ✅`);
   App.go('purchases');
+}
+
+/* ---------------------------------------------------------------------
+   7هـ) الفواتير المتكرّرة (الاشتراكات)
+   --------------------------------------------------------------------- */
+const RECUR_EVERY = { month: 'شهري', quarter: 'ربع سنوي', year: 'سنوي' };
+const RECUR_MONTHS = { month: 1, quarter: 3, year: 12 };
+
+/* إضافة أشهر لتاريخ ISO مع الحفاظ على آخر الشهر */
+function addMonths(iso, n) {
+  const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, last));
+  return d.toISOString().slice(0, 10);
+}
+
+/* إنشاء اشتراك من أمر بيع قائم (نسخ العميل والبنود) */
+function createRecurringFromSale(saleId, every, startDate) {
+  const sale = DB.get('sales', saleId);
+  if (!sale) return null;
+  const rec = DB.upsert('recurrings', {
+    partnerId: sale.partnerId,
+    every: every || 'month',
+    startDate: startDate || todayISO(),
+    nextDate: startDate || todayISO(),
+    active: true,
+    count: 0,
+    currency: sale.currency || 'BASE',
+    rate: num(sale.rate) || 1,
+    lines: (sale.lines || []).map(l => ({ productId: l.productId, name: l.name, qty: num(l.qty), price: num(l.price), disc: num(l.disc) })),
+  });
+  Audit.log('create', 'recurrings', partnerName(sale.partnerId), `اشتراك ${RECUR_EVERY[rec.every]}`);
+  toast('تم إنشاء فاتورة متكرّرة ✅');
+  return rec;
+}
+
+/* توليد أمر بيع مسودة من اشتراك وتقديم تاريخ الاستحقاق التالي */
+function generateRecurring(rec) {
+  if (!rec || !rec.active || !(rec.lines || []).length) return null;
+  const so = DB.upsert('sales', {
+    ref: DB.nextRef('SO'), partnerId: rec.partnerId, date: rec.nextDate || todayISO(),
+    status: 'draft', paid: 0, currency: rec.currency || 'BASE', rate: num(rec.rate) || 1,
+    note: 'مولّدة من فاتورة متكرّرة', recurringId: rec.id,
+    lines: rec.lines.map(l => ({ ...l })),
+  });
+  rec.lastGenerated = rec.nextDate || todayISO();
+  rec.nextDate = addMonths(rec.nextDate || todayISO(), RECUR_MONTHS[rec.every] || 1);
+  rec.count = num(rec.count) + 1;
+  DB.upsert('recurrings', rec);
+  Audit.log('create', 'sales', so.ref, 'توليد فاتورة متكرّرة');
+  return so;
+}
+
+/* توليد كل الاشتراكات المستحقّة (nextDate <= اليوم) */
+function generateDueRecurrings() {
+  const today = todayISO();
+  let n = 0;
+  DB.list('recurrings').filter(r => r.active && (r.nextDate || today) <= today).forEach(r => { if (generateRecurring(r)) n++; });
+  toast(n ? `تم توليد ${n} فاتورة مسودة ✅` : 'لا توجد اشتراكات مستحقّة اليوم');
+  return n;
 }
 
 /* ---------------------------------------------------------------------
@@ -1699,6 +1794,33 @@ const Views = {
   },
 
   /* ===== دليل الاستخدام ===== */
+  /* ===== الفواتير المتكرّرة (الاشتراكات) ===== */
+  subscriptions() {
+    const today = todayISO();
+    const list = DB.list('recurrings').slice().sort((a, b) => String(a.nextDate).localeCompare(String(b.nextDate)));
+    const due = list.filter(r => r.active && (r.nextDate || today) <= today);
+    let html = `<div class="card" style="display:flex;gap:8px;justify-content:space-between;align-items:center">
+      <div class="meta">النشطة: <b>${list.filter(r => r.active).length}</b> • مستحقّة اليوم: <b>${due.length}</b></div>
+      ${due.length ? `<button class="mini-btn" id="genDueBtn">⚡ توليد المستحقّة (${due.length})</button>` : ''}</div>`;
+    html += `<div class="card warn-card">ℹ️ أنشئ فاتورة متكرّرة من أي أمر بيع عبر زر «🔁 اشتراك» في تطبيق المبيعات.</div>`;
+    if (!list.length) return html + emptyState('🔁', 'لا توجد فواتير متكرّرة', 'من «المبيعات» اضغط «🔁 اشتراك» على أمر بيع.');
+    list.forEach(r => {
+      const t = docTotals({ lines: r.lines, paid: 0 });
+      const isDue = r.active && (r.nextDate || today) <= today;
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(partnerName(r.partnerId))} <span class="badge ${r.active ? 'ok' : 'muted'}">${r.active ? RECUR_EVERY[r.every] : 'متوقّف'}</span></div>
+          <div class="meta">الاستحقاق التالي: <b>${fmtDate(r.nextDate)}</b>${isDue ? ' <span class="badge warn">مستحقّة</span>' : ''} • وُلِّدت ${num(r.count)} مرة</div>
+          <div class="meta">${(r.lines || []).length} بند${num(r.lastGenerated) || r.lastGenerated ? ' • آخر توليد: ' + fmtDate(r.lastGenerated) : ''}</div>
+        </div><div class="title">${fmtMoney(t.total)}</div></div>
+        <div class="card-actions">
+          <button data-recgen="${r.id}">⚡ توليد الآن</button>
+          <button data-rectoggle="${r.id}">${r.active ? '⏸️ إيقاف' : '▶️ تفعيل'}</button>
+          <button class="del" data-recdel="${r.id}">🗑️ حذف</button>
+        </div></div>`;
+    });
+    return html;
+  },
+
   /* ===== الأصول الثابتة والإهلاك ===== */
   assets() {
     if (!App.depMonth) App.depMonth = todayISO().slice(0, 7);
@@ -1914,7 +2036,7 @@ const Views = {
     sales.forEach(d => (d.lines || []).forEach(l => {
       prodMap[l.productId] = prodMap[l.productId] || { qty: 0, total: 0 };
       prodMap[l.productId].qty += num(l.qty);
-      prodMap[l.productId].total += toBase(num(l.qty) * num(l.price), d);
+      prodMap[l.productId].total += toBase(lineNet(l), d);
     }));
     const top = Object.entries(prodMap).map(([id, v]) => ({ id, ...v }))
       .sort((a, b) => b.total - a.total).slice(0, 8);
@@ -2572,7 +2694,7 @@ function docCard(coll, d) {
   const isSale = coll === 'sales';
   const partyLabel = isSale ? 'العميل' : 'المورد';
   const linesHtml = (d.lines || []).map(l =>
-    `<div class="line-row"><span>${esc(productName(l.productId))} × ${fmtQty(l.qty)}</span><span>${fmtDoc(num(l.qty) * num(l.price), d)}</span></div>`
+    `<div class="line-row"><span>${esc(productName(l.productId))} × ${fmtQty(l.qty)}${num(l.disc) ? ` <span class="badge muted">-${num(l.disc)}%</span>` : ''}</span><span>${fmtDoc(lineNet(l), d)}</span></div>`
   ).join('');
   const curTag = docCurCode(d) !== 'BASE' ? ` <span class="badge muted">${esc(docCurCode(d))}</span>` : '';
   const canEdit = Perm.can('edit', App.route);
@@ -2598,6 +2720,7 @@ function docCard(coll, d) {
   } else if (canDel) {
     actions = `<button class="del" data-del="${coll}:${d.id}">🗑️ حذف</button>`;
   }
+  if (isSale && d.status !== 'cancel' && Perm.can('create', 'subscriptions')) actions += `<button data-subscribe="${d.id}">🔁 اشتراك</button>`;
   return `<div class="card"><div class="row"><div>
       <div class="title">${esc(d.ref || '—')} • ${esc(partnerName(d.partnerId))}${curTag}</div>
       <div class="meta">${partyLabel} • ${fmtDate(d.date)} • ${(d.lines || []).length} بند</div>
@@ -2607,6 +2730,7 @@ function docCard(coll, d) {
       ${d.approval === 'rejected' ? '<span class="badge danger">مرفوض</span>' : ''}
       ${d.returned ? '<span class="badge danger">مُرتجع</span>' : ''}
       <div class="title" style="margin-top:6px">${fmtDoc(t.total, d)}</div>
+      ${t.discount > 0.001 ? `<div class="meta">خصم: <b>${fmtDoc(t.discount, d)}</b></div>` : ''}
       ${t.due > 0.001 && d.status !== 'draft' && d.status !== 'cancel' ? `<div class="meta">المتبقي: <b>${fmtDoc(t.due, d)}</b></div>` : ''}
     </div></div>
     ${linesHtml ? `<div class="lines">${linesHtml}</div>` : ''}
@@ -2793,20 +2917,29 @@ function renderLines() {
         <select class="ln-prod">${'<option value="">— منتج —</option>' + opts}</select>
         <input class="ln-qty" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.qty)}" placeholder="كمية" />
         <input class="ln-price" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.price)}" placeholder="سعر" />
+        <input class="ln-disc" type="number" inputmode="decimal" step="any" min="0" max="100" value="${l.disc ? esc(l.disc) : ''}" placeholder="خصم%" title="نسبة الخصم %" />
         <button type="button" class="ln-del" data-i="${i}">✕</button>
       </div>`;
     }).join('');
   }
-  // الإجماليات
+  document.getElementById('lineTotals').innerHTML = lineTotalsHTML();
+  bindLineEvents();
+}
+
+/* ملخّص إجماليات مسودة البنود (مع الخصم) */
+function lineTotalsHTML() {
   const taxRate = num(DB.data.settings.taxRate);
-  let subtotal = 0;
-  lineDraft.forEach(l => subtotal += num(l.qty) * num(l.price));
+  let subtotal = 0, discount = 0;
+  lineDraft.forEach(l => {
+    const gross = num(l.qty) * num(l.price);
+    discount += gross * num(l.disc) / 100;
+    subtotal += gross * (1 - num(l.disc) / 100);
+  });
   const tax = subtotal * taxRate / 100;
-  document.getElementById('lineTotals').innerHTML =
-    `<div class="rep-row"><span>المجموع الفرعي</span><span>${fmtMoney(subtotal)}</span></div>
+  return `${discount > 0.001 ? `<div class="rep-row"><span>إجمالي الخصم</span><span>−${fmtMoney(discount)}</span></div>` : ''}
+     <div class="rep-row"><span>المجموع الفرعي</span><span>${fmtMoney(subtotal)}</span></div>
      <div class="rep-row"><span>الضريبة (${taxRate}%)</span><span>${fmtMoney(tax)}</span></div>
      <div class="rep-row strong"><span>الإجمالي</span><span>${fmtMoney(subtotal + tax)}</span></div>`;
-  bindLineEvents();
 }
 
 function bindLineEvents() {
@@ -2821,8 +2954,10 @@ function bindLineEvents() {
       if (p && !num(lineDraft[i].price)) { lineDraft[i].price = num(p.salePrice); renderLines(); }
       else lineDraft[i].name = p ? p.name : '';
     };
+    const disc = row.querySelector('.ln-disc');
     qty.oninput = () => { lineDraft[i].qty = qty.value; updateTotalsOnly(); };
     price.oninput = () => { lineDraft[i].price = price.value; updateTotalsOnly(); };
+    if (disc) disc.oninput = () => { lineDraft[i].disc = disc.value; updateTotalsOnly(); };
   });
   document.querySelectorAll('.ln-del').forEach(b => {
     b.onclick = () => { lineDraft.splice(+b.dataset.i, 1); renderLines(); };
@@ -2830,15 +2965,8 @@ function bindLineEvents() {
 }
 
 function updateTotalsOnly() {
-  const taxRate = num(DB.data.settings.taxRate);
-  let subtotal = 0;
-  lineDraft.forEach(l => subtotal += num(l.qty) * num(l.price));
-  const tax = subtotal * taxRate / 100;
   const el = document.getElementById('lineTotals');
-  if (el) el.innerHTML =
-    `<div class="rep-row"><span>المجموع الفرعي</span><span>${fmtMoney(subtotal)}</span></div>
-     <div class="rep-row"><span>الضريبة (${taxRate}%)</span><span>${fmtMoney(tax)}</span></div>
-     <div class="rep-row strong"><span>الإجمالي</span><span>${fmtMoney(subtotal + tax)}</span></div>`;
+  if (el) el.innerHTML = lineTotalsHTML();
 }
 
 /* ---------------------------------------------------------------------
@@ -2906,7 +3034,7 @@ function submitForm(e) {
   if (kind === 'doc') {
     obj.lines = lineDraft
       .filter(l => l.productId && num(l.qty) > 0)
-      .map(l => ({ productId: l.productId, name: productName(l.productId), qty: num(l.qty), price: num(l.price) }));
+      .map(l => ({ productId: l.productId, name: productName(l.productId), qty: num(l.qty), price: num(l.price), disc: num(l.disc) }));
     if (!obj.lines.length) { toast('أضِف بنداً واحداً على الأقل'); return; }
     obj.currency = obj.currency || 'BASE';
     obj.rate = obj.currency === 'BASE' ? 1 : (num(obj.rate) || 1);
@@ -3107,8 +3235,8 @@ function printDoc(coll, id) {
   const isSale = coll === 'sales';
   const rows = (doc.lines || []).map((l, i) => `
     <tr><td>${i + 1}</td><td>${esc(productName(l.productId))}</td>
-    <td>${fmtQty(l.qty)}</td><td>${fmtDoc(l.price, doc)}</td>
-    <td>${fmtDoc(num(l.qty) * num(l.price), doc)}</td></tr>`).join('');
+    <td>${fmtQty(l.qty)}</td><td>${fmtDoc(l.price, doc)}</td><td>${num(l.disc) ? num(l.disc) + '%' : '—'}</td>
+    <td>${fmtDoc(lineNet(l), doc)}</td></tr>`).join('');
   // رمز ZATCA للفواتير الضريبية (مبيعات)
   let qrHtml = '';
   if (isSale && typeof QR !== 'undefined') {
@@ -3139,11 +3267,12 @@ function printDoc(coll, id) {
       <div style="text-align:left"><div><b>${esc(doc.ref)}</b></div><div class="muted">${fmtDate(doc.date)}</div></div>
     </div>
     <div><b>${isSale ? 'العميل' : 'المورد'}:</b> ${esc(partnerName(doc.partnerId))}</div>
-    <table><thead><tr><th>#</th><th>المنتج</th><th>الكمية</th><th>السعر</th><th>الإجمالي</th></tr></thead>
+    <table><thead><tr><th>#</th><th>المنتج</th><th>الكمية</th><th>السعر</th><th>خصم</th><th>الإجمالي</th></tr></thead>
     <tbody>${rows}</tbody></table>
     <div class="foot">
       ${qrHtml}
       <div class="totals">
+        ${t.discount > 0.001 ? `<div class="r"><span>إجمالي الخصم</span><span>−${fmtDoc(t.discount, doc)}</span></div>` : ''}
         <div class="r"><span>المجموع الفرعي</span><span>${fmtDoc(t.subtotal, doc)}</span></div>
         <div class="r"><span>الضريبة (${s.taxRate}%)</span><span>${fmtDoc(t.tax, doc)}</span></div>
         <div class="r s"><span>الإجمالي</span><span>${fmtDoc(t.total, doc)}</span></div>
@@ -3678,6 +3807,13 @@ function bindViewEvents() {
   // تخطيط إعادة الطلب: إنشاء أمر شراء
   const reorderBtn = document.getElementById('reorderPoBtn');
   if (reorderBtn) reorderBtn.onclick = () => createReorderPO();
+  // الفواتير المتكرّرة (الاشتراكات)
+  on('[data-subscribe]', 'click', b => openSubscribeDialog(b.dataset.subscribe));
+  const genDue = document.getElementById('genDueBtn');
+  if (genDue) genDue.onclick = () => { generateDueRecurrings(); App.render(); };
+  on('[data-recgen]', 'click', b => { const so = generateRecurring(DB.get('recurrings', b.dataset.recgen)); toast(so ? 'تم توليد ' + so.ref + ' ✅' : 'تعذّر التوليد'); App.render(); });
+  on('[data-rectoggle]', 'click', b => { const r = DB.get('recurrings', b.dataset.rectoggle); if (r) { r.active = !r.active; DB.upsert('recurrings', r); App.render(); } });
+  on('[data-recdel]', 'click', b => { if (confirm('حذف هذا الاشتراك؟')) { DB.remove('recurrings', b.dataset.recdel); toast('تم الحذف'); App.render(); } });
   // الموازنات: تعديل قيمة موازنة حساب
   on('[data-budget]', 'change', b => {
     const s = DB.data.settings;
@@ -4178,7 +4314,7 @@ function exportReportCSV() {
   sales.forEach(d => (d.lines || []).forEach(l => {
     prodMap[l.productId] = prodMap[l.productId] || { qty: 0, total: 0 };
     prodMap[l.productId].qty += num(l.qty);
-    prodMap[l.productId].total += toBase(num(l.qty) * num(l.price), d);
+    prodMap[l.productId].total += toBase(lineNet(l), d);
   }));
   Object.entries(prodMap).sort((a, b) => b[1].total - a[1].total)
     .forEach(([id, v]) => rows.push([productName(id), fmtQty(v.qty), v.total.toFixed(2)]));
