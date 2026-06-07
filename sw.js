@@ -1,12 +1,15 @@
-/* عامل الخدمة — يتيح عمل التطبيق دون اتصال بالإنترنت */
-const CACHE = 'mill-maint-v1';
+/* عامل الخدمة — يتيح عمل MOS ERP دون اتصال بالإنترنت */
+const CACHE = 'mos-erp-v3';
 const ASSETS = [
   './',
   './index.html',
   './css/styles.css',
+  './js/qr.js',
   './js/app.js',
   './manifest.webmanifest',
   './icons/icon.svg',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
 ];
 
 self.addEventListener('install', (e) => {

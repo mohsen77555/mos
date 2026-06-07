@@ -4,20 +4,18 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- أسنان الترس -->
-    <path android:fillColor="#d4a24e" android:pathData="M50,26 h8 v9 h-8 z" />
-    <path android:fillColor="#d4a24e" android:pathData="M50,73 h8 v9 h-8 z" />
-    <path android:fillColor="#d4a24e" android:pathData="M26,50 h9 v8 h-9 z" />
-    <path android:fillColor="#d4a24e" android:pathData="M73,50 h9 v8 h-9 z" />
+    <!-- أعمدة مخطط الأعمال -->
+    <path android:fillColor="#ffffff" android:pathData="M34,64 h11 v20 h-11 z" />
+    <path android:fillColor="#ffffff" android:pathData="M48,52 h11 v32 h-11 z" />
+    <path android:fillColor="#ffffff" android:pathData="M62,40 h11 v44 h-11 z" />
 
-    <!-- حلقة الترس -->
+    <!-- خط الاتجاه الصاعد -->
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#d4a24e"
-        android:strokeWidth="6"
-        android:pathData="M54,32 a22,22 0 1,1 -0.01,0 Z" />
-
-    <!-- صرّة الترس -->
-    <path android:fillColor="#f4f1ec" android:pathData="M54,44 a10,10 0 1,1 -0.01,0 Z" />
-    <path android:fillColor="#8a5a2b" android:pathData="M54,49 a5,5 0 1,1 -0.01,0 Z" />
+        android:strokeColor="#00A09D"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M39,60 L54,44 L68,36" />
+    <path android:fillColor="#ffd966" android:pathData="M68,32 a4,4 0 1,1 -0.01,0 Z" />
 </vector>

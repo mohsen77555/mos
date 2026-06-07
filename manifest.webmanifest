@@ -1,20 +1,32 @@
 {
-  "name": "صيانة مطحنة الدقيق",
-  "short_name": "صيانة المطحنة",
-  "description": "إدارة المعدات والصيانة الدورية وأوامر العمل وقطع الغيار لمطحنة الدقيق",
+  "name": "MOS ERP — نظام إدارة الأعمال",
+  "short_name": "MOS ERP",
+  "description": "نظام تخطيط موارد المؤسسات (ERP) عربي: مبيعات ومشتريات ومخزون ومحاسبة وموارد بشرية — يعمل دون اتصال.",
   "lang": "ar",
   "dir": "rtl",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f4f1ec",
-  "theme_color": "#8a5a2b",
+  "background_color": "#f5f5f8",
+  "theme_color": "#714B67",
   "icons": [
     {
       "src": "icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]
