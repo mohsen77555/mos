@@ -34,6 +34,7 @@ const DB = {
       vouchers: [],   // سندات القبض/الصرف والتحويلات
       posSessions: [],// ورديات نقطة البيع
       leaves: [],     // إجازات الموظفين
+      audit: [],      // سجل التدقيق (الحوكمة)
       settings: {
         company: 'شركتي',
         currency: 'ر.س',        // رمز العملة الأساسية
@@ -50,6 +51,8 @@ const DB = {
         dbVersion: 0,            // نسخة قاعدة البيانات (للترقيات)
         warehouses: [],          // المخازن
         reconciled: {},          // أسطر القيود المسوّاة بنكياً { journalId: true }
+        approval: { enabled: false, threshold: 5000 },  // دورة الاعتماد (الحوكمة)
+        perms: {},               // تجاوزات الصلاحيات الدقيقة لكل دور { role: {create,edit,delete,approve} }
       },
     };
   },
@@ -264,7 +267,7 @@ const ROLES = { admin: 'مدير النظام', accountant: 'محاسب', sales:
 /* التطبيقات المسموحة لكل دور */
 const ROLE_APPS = {
   admin: '*',
-  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'reports', 'guide'],
+  accountant: ['dashboard', 'partners', 'products', 'sales', 'purchases', 'inventory', 'manufacturing', 'invoicing', 'treasury', 'accounting', 'payroll', 'reports', 'governance', 'guide'],
   sales: ['dashboard', 'crm', 'pos', 'partners', 'products', 'sales', 'inventory', 'invoicing', 'guide'],
   viewer: ['dashboard', 'reports', 'guide'],
 };
@@ -302,9 +305,11 @@ const Auth = {
     else if (u.pin && String(u.pin) !== String(pin)) return false;   // توافق قديم
     this.user = u;
     try { localStorage.setItem('mos_erp_user', id); } catch (e) {}
+    Audit.log('login', 'users', u.name);
     return true;
   },
   logout() {
+    Audit.log('logout', 'users', this.user ? this.user.name : '');
     this.user = null;
     try { localStorage.removeItem('mos_erp_user'); } catch (e) {}
   },
@@ -317,6 +322,57 @@ const Auth = {
     if (this.users().length === 1 && !this.hasPin(this.users()[0])) { this.user = this.users()[0]; return true; }
     return false;
   },
+};
+
+/* ---------------------------------------------------------------------
+   2ب) الحوكمة: الصلاحيات الدقيقة + سجل التدقيق
+   --------------------------------------------------------------------- */
+/* القدرات الافتراضية لكل دور (إضافة/تعديل/حذف/اعتماد) — قابلة للتخصيص من الإعدادات */
+const CAPS = ['create', 'edit', 'delete', 'approve'];
+const CAP_LABELS = { create: 'إضافة', edit: 'تعديل', delete: 'حذف', approve: 'اعتماد' };
+const ROLE_CAPS = {
+  admin:      { create: 1, edit: 1, delete: 1, approve: 1 },
+  accountant: { create: 1, edit: 1, delete: 1, approve: 1 },
+  sales:      { create: 1, edit: 1, delete: 0, approve: 0 },
+  viewer:     { create: 0, edit: 0, delete: 0, approve: 0 },
+};
+
+const Perm = {
+  /* قدرات الدور الحالي بعد دمج التخصيصات المحفوظة */
+  caps(role) {
+    role = role || Auth.role();
+    const base = ROLE_CAPS[role] || ROLE_CAPS.viewer;
+    const over = (DB.data.settings.perms || {})[role] || {};
+    return Object.assign({}, base, over);
+  },
+  /* هل يملك الدور الحالي القدرة المطلوبة على هذا التطبيق؟ */
+  can(cap, route) {
+    if (route && !Auth.can(route)) return false;   // لا وصول للتطبيق أصلاً
+    if (cap === 'view') return true;
+    return !!this.caps()[cap];
+  },
+};
+
+/* سجل التدقيق: من فعل ماذا ومتى */
+const Audit = {
+  log(action, entity, ref, details) {
+    if (!Array.isArray(DB.data.audit)) DB.data.audit = [];
+    DB.data.audit.push({
+      id: uid(),
+      at: Date.now(),
+      user: Auth.user ? Auth.user.name : '—',
+      role: Auth.user ? Auth.user.role : '',
+      action, entity: entity || '', ref: ref || '', details: details || '',
+    });
+    if (DB.data.audit.length > 3000) DB.data.audit = DB.data.audit.slice(-3000);
+    DB.save();
+  },
+  list() { return (DB.data.audit || []).slice().sort((a, b) => b.at - a.at); },
+};
+const AUDIT_ACTIONS = {
+  create: 'إضافة', update: 'تعديل', delete: 'حذف', confirm: 'تأكيد', cancel: 'إلغاء',
+  pay: 'دفعة', return: 'مرتجع', voucher: 'سند', approve: 'اعتماد', reject: 'رفض',
+  request: 'طلب اعتماد', login: 'دخول', logout: 'خروج', demo: 'بيانات تجريبية', reset: 'تصفير',
 };
 
 /* ---------------------------------------------------------------------
@@ -722,6 +778,7 @@ const APPS = [
   { route: 'employees', label: 'الموظفون', icon: '🧑‍💼', color: '#fd7e14' },
   { route: 'payroll', label: 'الرواتب', icon: '💵', color: '#e83e8c' },
   { route: 'reports', label: 'التقارير', icon: '📈', color: '#6f42c1' },
+  { route: 'governance', label: 'الحوكمة والامتثال', icon: '🛡️', color: '#5b21b6' },
   { route: 'guide', label: 'دليل الاستخدام', icon: '❓', color: '#607d8b' },
   { route: 'settings', label: 'الإعدادات', icon: '⚙️', color: '#6c757d' },
 ];
@@ -743,6 +800,7 @@ const App = {
   vatTo: '',
   treasTab: 'vouchers',  // تبويب الخزينة
   recAcc: '',            // حساب التسوية البنكية
+  govTab: 'compliance',  // تبويب الحوكمة (الامتثال/الاعتمادات/سجل التدقيق)
 
   // التطبيقات التي يظهر فيها زر الإضافة العائم
   fabRoutes: { partners: 1, products: 1, sales: 1, purchases: 1, employees: 1, accounting: 1, crm: 1 },
@@ -772,6 +830,7 @@ const App = {
 function updateFab() {
   let show = !!App.fabRoutes[App.route];
   if (App.route === 'accounting') show = (App.acctTab === 'accounts' || App.acctTab === 'journal');
+  if (show && !Perm.can('create', App.route)) show = false;   // الحوكمة: صلاحية الإضافة
   document.getElementById('fab').classList.toggle('hidden', !show);
 }
 
@@ -794,6 +853,17 @@ function confirmDoc(coll, id) {
   if (!doc || doc.status !== 'draft') return;
   if (!(doc.lines || []).length) { toast('أضِف بنوداً أولاً'); return; }
   if (lockedToast(doc.date || todayISO())) return;
+  // دورة الاعتماد: المستندات فوق الحدّ تحتاج موافقة مدير قبل التأكيد
+  const ap = DB.data.settings.approval || {};
+  if (ap.enabled && doc.approval !== 'approved' && docTotals(doc).total >= num(ap.threshold)) {
+    if (doc.approval !== 'pending') {
+      doc.approval = 'pending';
+      DB.upsert(coll, doc);
+      Audit.log('request', coll, doc.ref, `طلب اعتماد ${fmtMoney(docTotals(doc).total)}`);
+    }
+    toast('🔒 المستند يتجاوز حدّ الاعتماد — بانتظار موافقة المدير');
+    return;
+  }
   const isSale = coll === 'sales';
   const sign = isSale ? -1 : +1;            // البيع يُنقص المخزون، الشراء يزيده
   const costSnap = [];                       // لقطة التكلفة قبل التغيير (للإلغاء)
@@ -828,7 +898,29 @@ function confirmDoc(coll, id) {
   doc.costSnap = costSnap;
   DB.upsert(coll, doc);
   postDocConfirm(coll, doc);
+  Audit.log('confirm', coll, doc.ref, fmtMoney(docTotals(doc).total));
   toast('تم التأكيد وترحيل المخزون والقيد المحاسبي ✅');
+}
+
+/* اعتماد/رفض مستند بانتظار الموافقة (الحوكمة) */
+function approveDoc(coll, id) {
+  if (!Perm.can('approve', coll)) { toast('لا تملك صلاحية الاعتماد'); return; }
+  const doc = DB.get(coll, id);
+  if (!doc || doc.approval !== 'pending') return;
+  doc.approval = 'approved';
+  doc.approvedBy = Auth.user ? Auth.user.name : '';
+  DB.upsert(coll, doc);
+  Audit.log('approve', coll, doc.ref);
+  confirmDoc(coll, id);   // تابع التأكيد تلقائياً بعد الاعتماد
+}
+function rejectDoc(coll, id) {
+  if (!Perm.can('approve', coll)) { toast('لا تملك صلاحية الاعتماد'); return; }
+  const doc = DB.get(coll, id);
+  if (!doc || doc.approval !== 'pending') return;
+  doc.approval = 'rejected';
+  DB.upsert(coll, doc);
+  Audit.log('reject', coll, doc.ref);
+  toast('تم رفض المستند');
 }
 
 /* إلغاء مستند: عكس حركات المخزون إن كان مؤكداً */
@@ -856,6 +948,7 @@ function cancelDoc(coll, id) {
   }
   doc.status = 'cancel';
   DB.upsert(coll, doc);
+  Audit.log('cancel', coll, doc.ref);
   toast('تم إلغاء المستند وعكس القيود');
 }
 
@@ -910,6 +1003,7 @@ function createReturn(coll, id) {
   Acct.post({ date, ref: ret.ref, narration: (isSale ? 'مرتجع مبيعات ' : 'مرتجع مشتريات ') + doc.ref, source: 'return', sourceId: ret.id, docId: ret.id, lines });
   doc.returned = true; doc.returnRef = ret.ref;
   DB.upsert(coll, doc);
+  Audit.log('return', coll, doc.ref, ret.ref);
   toast('تم إنشاء المرتجع وعكس أثره ✅');
 }
 
@@ -940,13 +1034,16 @@ function postVoucher(v) {
   }
   const rec = DB.upsert('vouchers', { ref: DB.nextRef('CV'), ...v, amount: amt });
   Acct.post({ date: v.date, ref: rec.ref, narration: v.note || VOUCHER_LABEL[v.type], source: 'voucher', sourceId: rec.id, docId: rec.id, lines });
+  Audit.log('voucher', 'vouchers', rec.ref, `${VOUCHER_LABEL[v.type]} — ${fmtMoney(amt)}`);
   toast('تم ترحيل ' + VOUCHER_LABEL[v.type] + ' ✅');
   return rec;
 }
 
 function deleteVoucher(id) {
+  const v = DB.get('vouchers', id);
   Acct.removeByDoc(id);
   DB.remove('vouchers', id);
+  Audit.log('delete', 'vouchers', v ? v.ref : '');
 }
 
 function openVoucherDialog(type) {
@@ -1094,6 +1191,7 @@ function registerPayment(coll, id, amount, method, payRate) {
     payRate: pr,            // سعر يوم الدفع (للنقدية وفرق الصرف)
   });
   postPayment(coll, doc, amt, method || 'cash', pay.id, pr);
+  Audit.log('pay', coll, doc.ref, `${fmtMoney(amt)} — ${PAY_METHOD[method] || method || 'نقدي'}`);
   const fxNote = Math.abs(pr - docRate(doc)) > 0.0001 ? ' (مع فرق صرف)' : '';
   toast('تم تسجيل الدفعة وترحيل القيد ✅' + fxNote);
 }
@@ -1454,6 +1552,18 @@ const Views = {
   },
 
   /* ===== دليل الاستخدام ===== */
+  /* ===== الحوكمة والامتثال ===== */
+  governance() {
+    const tabs = [
+      ['compliance', '🛡️ الامتثال'], ['approvals', '✅ الاعتمادات'],
+      ['audit', '📜 سجل التدقيق'], ['perms', '🔑 الصلاحيات'],
+    ];
+    let html = `<div class="acct-tabs">` + tabs.map(([k, l]) =>
+      `<button class="acct-tab ${App.govTab === k ? 'active' : ''}" data-govtab="${k}">${l}</button>`).join('') + `</div>`;
+    html += (GovViews[App.govTab] || GovViews.compliance)();
+    return html;
+  },
+
   guide() {
     const step = (n, t, d) => `<div class="card"><div class="row"><div>
       <div class="title">${n}. ${esc(t)}</div><div class="meta">${d}</div></div></div></div>`;
@@ -1703,12 +1813,170 @@ const Views = {
         <button class="mini-btn" id="addUserBtn" style="margin-top:10px">＋ إضافة مستخدم</button>
       </div>
 
+      <div class="section-title">🛡️ الحوكمة ودورة الاعتماد</div>
+      <div class="card">
+        <label class="perm-cell" style="font-size:1rem">
+          <input type="checkbox" id="apEnabled" ${s.approval && s.approval.enabled ? 'checked' : ''}/>
+          <span>تفعيل دورة اعتماد المستندات</span>
+        </label>
+        <div class="field" style="margin-top:12px">
+          <label>حدّ الاعتماد — المستندات التي يساوي إجماليها هذا الحدّ أو يزيد تحتاج موافقة مدير قبل التأكيد</label>
+          <input type="number" id="apThreshold" inputmode="decimal" step="any" min="0" value="${num(s.approval && s.approval.threshold)}"/>
+        </div>
+        <div class="card-actions">
+          <button class="mini-btn" id="saveApproval">💾 حفظ إعدادات الاعتماد</button>
+          <button class="mini-btn" data-go="governance">🛡️ فتح لوحة الحوكمة</button>
+        </div>
+        <div class="meta" style="margin-top:8px">يضبط المدير صلاحيات الأدوار وسجل التدقيق من لوحة الحوكمة.</div>
+      </div>
+
       <div class="section-title">ℹ️ عن النظام</div>
       <div class="card"><div class="meta">
         <b>MOS ERP</b> — نظام تخطيط موارد المؤسسات.<br>
         يعمل دون اتصال بالإنترنت ويحفظ بياناتك على جهازك فقط (لا تُرسل لأي خادم).<br>
         استخدم زر «تصدير نسخة» بانتظام لحماية بياناتك.
       </div></div>`;
+  },
+};
+
+/* ---------------------------------------------------------------------
+   8أ) الحوكمة: عروض الامتثال والاعتمادات وسجل التدقيق والصلاحيات
+   --------------------------------------------------------------------- */
+const ENTITY_LABELS = {
+  sales: 'مبيعات', purchases: 'مشتريات', partners: 'جهة اتصال', products: 'منتج',
+  employees: 'موظف', payslips: 'راتب', accounts: 'حساب', journal: 'قيد', leads: 'فرصة',
+  vouchers: 'سند', returns: 'مرتجع', users: 'مستخدم', perms: 'صلاحيات', settings: 'إعدادات',
+};
+function entityLabel(c) { return ENTITY_LABELS[c] || c || ''; }
+function govDays(a, b) { return Math.round((new Date(b) - new Date(a)) / 86400000); }
+function fmtDateTime(ts) {
+  const d = new Date(ts);
+  if (isNaN(d)) return '—';
+  return d.toLocaleDateString('ar-EG', { month: 'short', day: 'numeric' }) + ' ' +
+    d.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+}
+/* المستندات المعلّقة بانتظار الاعتماد */
+function govPendingDocs() {
+  const out = [];
+  ['sales', 'purchases'].forEach(coll => {
+    DB.list(coll).forEach(d => { if (d.approval === 'pending' && d.status === 'draft') out.push({ coll, d }); });
+  });
+  return out.sort((a, b) => (b.d.createdAt || 0) - (a.d.createdAt || 0));
+}
+/* بطاقة مؤشر امتثال */
+function govCard(status, title, detail, btnHtml) {
+  const badge = {
+    ok: '<span class="badge ok">سليم</span>', warn: '<span class="badge warn">تنبيه</span>',
+    danger: '<span class="badge danger">حرج</span>', info: '<span class="badge info">معلومة</span>',
+  }[status] || '';
+  return `<div class="card"><div class="row"><div class="title">${title}</div>${badge}</div>
+    <div class="meta">${esc(detail)}</div>${btnHtml ? `<div class="card-actions">${btnHtml}</div>` : ''}</div>`;
+}
+
+const GovViews = {
+  /* لوحة الامتثال */
+  compliance() {
+    const today = todayISO();
+    const pend = govPendingDocs();
+    const unbal = DB.list('journal').filter(j => {
+      const dr = (j.lines || []).reduce((s, l) => s + num(l.debit), 0);
+      const cr = (j.lines || []).reduce((s, l) => s + num(l.credit), 0);
+      return Math.abs(dr - cr) > 0.005;
+    });
+    const ap = DB.data.settings.approval || {};
+    const lock = DB.data.settings.lockDate;
+    const overdue = [];
+    ['sales', 'purchases'].forEach(c => DB.list(c).forEach(d => {
+      if (d.status === 'confirmed' && docTotals(d).due > 0.005 && govDays(d.date, today) > 30) overdue.push(d);
+    }));
+    const lowStock = DB.list('products').filter(p => p.type !== 'service' && num(p.minQty) > 0 && num(p.qty) < num(p.minQty));
+    const noPin = Auth.users().filter(u => !Auth.hasPin(u));
+    const todayCount = Audit.list().filter(a => new Date(a.at).toISOString().slice(0, 10) === today).length;
+
+    let html = `<div class="muted-text" style="margin-bottom:10px">مؤشرات الحوكمة والامتثال — حالة النظام الآن.</div>`;
+    html += govCard(unbal.length ? 'danger' : 'ok', '⚖️ توازن القيود',
+      unbal.length ? `${unbal.length} قيد غير متوازن — يجب تصحيحه فوراً` : 'كل القيود متوازنة (مدين = دائن).',
+      unbal.length ? '<button data-go="accounting">فتح المحاسبة</button>' : '');
+    html += govCard(pend.length ? 'warn' : 'ok', '✅ اعتمادات معلّقة',
+      pend.length ? `${pend.length} مستند بانتظار موافقة المدير.` : 'لا توجد مستندات معلّقة.',
+      pend.length ? '<button data-govtab="approvals">عرض الاعتمادات</button>' : '');
+    html += govCard(ap.enabled ? 'ok' : 'warn', '🔒 دورة الاعتماد',
+      ap.enabled ? `مفعّلة — الحدّ ${fmtMoney(ap.threshold)}.` : 'غير مفعّلة — يُنصح بتفعيلها من الإعدادات.',
+      '<button data-go="settings">الإعدادات</button>');
+    html += govCard(lock ? 'ok' : 'warn', '📅 إقفال الفترة',
+      lock ? `الفترة مقفلة حتى ${fmtDate(lock)} — لا تعديل قبلها.` : 'لا يوجد تاريخ إقفال — الفترات مفتوحة.', '');
+    html += govCard(overdue.length ? 'warn' : 'ok', '⏰ فواتير متأخرة (> 30 يوماً)',
+      overdue.length ? `${overdue.length} فاتورة مستحقة ومتأخرة السداد.` : 'لا توجد فواتير متأخرة.',
+      overdue.length ? '<button data-go="invoicing">الفوترة</button>' : '');
+    html += govCard(lowStock.length ? 'warn' : 'ok', '📦 مخزون تحت حدّ الطلب',
+      lowStock.length ? `${lowStock.length} منتج تحت حدّ إعادة الطلب.` : 'مستويات المخزون سليمة.',
+      lowStock.length ? '<button data-go="inventory">المخزون</button>' : '');
+    html += govCard(noPin.length > 1 ? 'warn' : 'ok', '👤 حماية الدخول',
+      noPin.length > 1 ? `${noPin.length} مستخدم بلا رمز دخول (PIN).` : 'حماية الدخول مناسبة.',
+      noPin.length > 1 ? '<button data-go="settings">الإعدادات</button>' : '');
+    html += govCard('info', '📜 نشاط اليوم', `${todayCount} عملية مُسجَّلة في سجل التدقيق اليوم.`,
+      '<button data-govtab="audit">عرض السجل</button>');
+    return html;
+  },
+
+  /* طابور الاعتمادات */
+  approvals() {
+    const pend = govPendingDocs();
+    const canApprove = Perm.can('approve');
+    let html = `<div class="muted-text" style="margin-bottom:10px">المستندات التي تجاوزت حدّ الاعتماد وتنتظر موافقة المدير.</div>`;
+    if (!pend.length) return html + emptyState('✅', 'لا اعتمادات معلّقة', 'كل المستندات معتمدة أو دون الحدّ.');
+    pend.forEach(({ coll, d }) => {
+      const t = docTotals(d);
+      html += `<div class="card"><div class="row"><div>
+          <div class="title">${esc(d.ref || '—')} • ${esc(partnerName(d.partnerId))}</div>
+          <div class="meta">${coll === 'sales' ? 'أمر بيع' : 'أمر شراء'} • ${fmtDate(d.date)} • ${(d.lines || []).length} بند</div>
+        </div><div style="text-align:left"><span class="badge warn">بانتظار الاعتماد</span>
+          <div class="title" style="margin-top:6px">${fmtMoney(t.total)}</div></div></div>
+        <div class="card-actions">${canApprove
+          ? `<button data-approve="${coll}:${d.id}">✅ اعتماد وتأكيد</button>
+             <button class="del" data-reject="${coll}:${d.id}">✖️ رفض</button>`
+          : '<span class="muted-text">لا تملك صلاحية الاعتماد.</span>'}</div></div>`;
+    });
+    return html;
+  },
+
+  /* سجل التدقيق */
+  audit() {
+    const all = Audit.list();
+    const q = (App.search || '').trim().toLowerCase();
+    let list = all;
+    if (q) list = all.filter(a =>
+      [a.user, AUDIT_ACTIONS[a.action] || a.action, entityLabel(a.entity), a.ref, a.details].join(' ').toLowerCase().includes(q));
+    let html = searchBar('ابحث في سجل التدقيق (مستخدم/عملية/مرجع)...');
+    html += `<div class="row" style="margin:0 0 10px">
+        <span class="muted-text">إجمالي السجلات: <b>${all.length}</b></span>
+        <button class="mini-btn" data-export="audit-csv">⬇️ تصدير CSV</button></div>`;
+    if (!list.length) return html + emptyState('📜', 'لا توجد سجلات', 'تُسجَّل كل العمليات هنا تلقائياً.');
+    list.slice(0, 200).forEach(a => {
+      html += `<div class="card audit-row"><div class="row"><div>
+          <div class="title">${esc(AUDIT_ACTIONS[a.action] || a.action)}
+            ${a.entity ? `<span class="badge muted">${esc(entityLabel(a.entity))}</span>` : ''}
+            ${a.ref ? `<span class="muted-text">${esc(a.ref)}</span>` : ''}</div>
+          <div class="meta">👤 ${esc(a.user)} • ${fmtDateTime(a.at)}${a.details ? ' • ' + esc(a.details) : ''}</div>
+        </div></div></div>`;
+    });
+    if (list.length > 200) html += `<div class="muted-text" style="text-align:center">عرض أحدث 200 من ${list.length}.</div>`;
+    return html;
+  },
+
+  /* مصفوفة الصلاحيات الدقيقة */
+  perms() {
+    const editable = Auth.isAdmin();
+    let html = `<div class="muted-text" style="margin-bottom:10px">صلاحيات كل دور. الوصول للتطبيقات يُحدَّد بالدور، وهذه الجدول يضبط العمليات داخلها.${editable ? '' : ' (للمدير فقط التعديل)'}</div>`;
+    html += `<div class="card"><div class="row"><div class="title">👑 ${esc(ROLES.admin)}</div><span class="badge ok">كل الصلاحيات</span></div></div>`;
+    Object.keys(ROLE_CAPS).filter(r => r !== 'admin').forEach(r => {
+      const caps = Perm.caps(r);
+      const cells = CAPS.map(c =>
+        `<label class="perm-cell"><input type="checkbox" data-perm="${r}:${c}" ${caps[c] ? 'checked' : ''} ${editable ? '' : 'disabled'}/> <span>${CAP_LABELS[c]}</span></label>`
+      ).join('');
+      html += `<div class="card"><div class="title">${esc(ROLES[r])}</div><div class="perm-grid">${cells}</div></div>`;
+    });
+    return html;
   },
 };
 
@@ -1992,17 +2260,27 @@ function docCard(coll, d) {
     `<div class="line-row"><span>${esc(productName(l.productId))} × ${fmtQty(l.qty)}</span><span>${fmtDoc(num(l.qty) * num(l.price), d)}</span></div>`
   ).join('');
   const curTag = docCurCode(d) !== 'BASE' ? ` <span class="badge muted">${esc(docCurCode(d))}</span>` : '';
+  const canEdit = Perm.can('edit', App.route);
+  const canDel = Perm.can('delete', App.route);
   let actions = '';
   if (d.status === 'draft') {
-    actions = `<button data-confirm="${coll}:${d.id}">✅ تأكيد</button>
-      <button data-edit="${coll}:${d.id}">✏️ تعديل</button>
-      <button class="del" data-del="${coll}:${d.id}">🗑️</button>`;
+    if (d.approval === 'pending') {
+      actions = Perm.can('approve', App.route)
+        ? `<button data-approve="${coll}:${d.id}">✅ اعتماد وتأكيد</button>
+           <button class="del" data-reject="${coll}:${d.id}">✖️ رفض</button>`
+        : '<span class="muted-text">بانتظار اعتماد المدير</span>';
+      if (canEdit) actions += `<button data-edit="${coll}:${d.id}">✏️ تعديل</button>`;
+    } else {
+      if (canEdit) actions += `<button data-confirm="${coll}:${d.id}">✅ تأكيد</button>
+        <button data-edit="${coll}:${d.id}">✏️ تعديل</button>`;
+      if (canDel) actions += `<button class="del" data-del="${coll}:${d.id}">🗑️</button>`;
+    }
   } else if (d.status === 'confirmed' || d.status === 'paid') {
-    if (t.due > 0.001) actions += `<button data-pay="${coll}:${d.id}">💵 تسجيل دفعة</button>`;
+    if (t.due > 0.001 && canEdit) actions += `<button data-pay="${coll}:${d.id}">💵 تسجيل دفعة</button>`;
     actions += `<button data-print="${coll}:${d.id}">🖨️ طباعة</button>`;
-    if (!d.returned) actions += `<button data-return="${coll}:${d.id}">↩️ مرتجع</button>`;
-    if (d.status !== 'paid') actions += `<button class="del" data-cancel="${coll}:${d.id}">✖️ إلغاء</button>`;
-  } else {
+    if (!d.returned && canEdit) actions += `<button data-return="${coll}:${d.id}">↩️ مرتجع</button>`;
+    if (d.status !== 'paid' && canEdit) actions += `<button class="del" data-cancel="${coll}:${d.id}">✖️ إلغاء</button>`;
+  } else if (canDel) {
     actions = `<button class="del" data-del="${coll}:${d.id}">🗑️ حذف</button>`;
   }
   return `<div class="card"><div class="row"><div>
@@ -2010,6 +2288,8 @@ function docCard(coll, d) {
       <div class="meta">${partyLabel} • ${fmtDate(d.date)} • ${(d.lines || []).length} بند</div>
     </div><div style="text-align:left">
       <span class="badge ${st}">${esc(DOC_STATUS[d.status] || d.status)}</span>
+      ${d.approval === 'pending' ? '<span class="badge warn">بانتظار الاعتماد</span>' : ''}
+      ${d.approval === 'rejected' ? '<span class="badge danger">مرفوض</span>' : ''}
       ${d.returned ? '<span class="badge danger">مُرتجع</span>' : ''}
       <div class="title" style="margin-top:6px">${fmtDoc(t.total, d)}</div>
       ${t.due > 0.001 && d.status !== 'draft' && d.status !== 'cancel' ? `<div class="meta">المتبقي: <b>${fmtDoc(t.due, d)}</b></div>` : ''}
@@ -2301,6 +2581,7 @@ function submitForm(e) {
   if (kind === 'payslip') {
     ['basic', 'allowances', 'deductions'].forEach(k => { obj[k] = num(obj[k]); });
     DB.upsert('payslips', obj);
+    Audit.log(id ? 'update' : 'create', 'payslips', obj.ref || '');
     closeForm();
     toast('تم حفظ القسيمة ✅');
     App.render();
@@ -2326,7 +2607,8 @@ function submitForm(e) {
     });
   }
 
-  DB.upsert(coll, obj);
+  const rec = DB.upsert(coll, obj);
+  Audit.log(id ? 'update' : 'create', coll, rec.ref || rec.name || rec.code || '');
   closeForm();
   toast(id ? 'تم التحديث ✅' : 'تمت الإضافة ✅');
   App.render();
@@ -3033,6 +3315,7 @@ function loadDemoData() {
     { productId: p2.id, qty: 2, price: 800 }, { productId: p3.id, qty: 10, price: 120 },
   ] });
   confirmDoc('sales', so2.id);   // غير مدفوعة (ذمم مدينة)
+  Audit.log('demo', '', '', 'تحميل بيانات تجريبية');
   toast('تم تحميل البيانات التجريبية ✅');
   App.go('dashboard');
 }
@@ -3053,10 +3336,33 @@ function bindViewEvents() {
   }
 
   on('[data-go]', 'click', b => App.go(b.dataset.go));
-  on('[data-edit]', 'click', b => { const [c, i] = b.dataset.edit.split(':'); openForm(c, i); });
+  on('[data-edit]', 'click', b => {
+    const [c, i] = b.dataset.edit.split(':');
+    if (!Perm.can('edit', App.route)) { toast('لا تملك صلاحية التعديل'); return; }
+    openForm(c, i);
+  });
   on('[data-del]', 'click', b => {
     const [c, i] = b.dataset.del.split(':');
-    if (confirm('هل تريد الحذف نهائياً؟')) { DB.remove(c, i); toast('تم الحذف'); App.render(); }
+    if (!Perm.can('delete', App.route)) { toast('لا تملك صلاحية الحذف'); return; }
+    if (confirm('هل تريد الحذف نهائياً؟')) {
+      const rec = DB.get(c, i);
+      DB.remove(c, i);
+      Audit.log('delete', c, rec ? (rec.ref || rec.name || rec.code || '') : '');
+      toast('تم الحذف'); App.render();
+    }
+  });
+  on('[data-approve]', 'click', b => { const [c, i] = b.dataset.approve.split(':'); approveDoc(c, i); App.render(); });
+  on('[data-reject]', 'click', b => { const [c, i] = b.dataset.reject.split(':'); if (confirm('رفض هذا المستند؟')) { rejectDoc(c, i); App.render(); } });
+  on('[data-govtab]', 'click', b => { App.govTab = b.dataset.govtab; App.render(); });
+  on('[data-perm]', 'change', b => {
+    if (!Auth.isAdmin()) { toast('تعديل الصلاحيات للمدير فقط'); b.checked = !b.checked; return; }
+    const [role, cap] = b.dataset.perm.split(':');
+    const s = DB.data.settings;
+    if (!s.perms[role]) s.perms[role] = Object.assign({}, ROLE_CAPS[role]);
+    s.perms[role][cap] = b.checked ? 1 : 0;
+    DB.save();
+    Audit.log('update', 'perms', ROLES[role], `${CAP_LABELS[cap]} = ${b.checked ? 'مسموح' : 'ممنوع'}`);
+    toast('تم تحديث الصلاحية');
   });
   on('[data-confirm]', 'click', b => { const [c, i] = b.dataset.confirm.split(':'); confirmDoc(c, i); App.render(); });
   on('[data-cancel]', 'click', b => {
@@ -3130,6 +3436,7 @@ function bindViewEvents() {
     if (k === 'report-pdf') printReport();
     else if (k === 'report-csv') exportReportCSV();
     else if (k === 'trial-csv') exportTrialCSV();
+    else if (k === 'audit-csv') exportAuditCSV();
   });
 
   // مدى تواريخ التقارير
@@ -3274,6 +3581,17 @@ function bindViewEvents() {
     if (used) { toast('لا يمكن حذف مخزن عليه حركات'); return; }
     if (confirm('حذف هذا المخزن؟')) { DB.data.settings.warehouses = DB.data.settings.warehouses.filter(w => w.id !== id); DB.save(); toast('تم الحذف'); App.render(); }
   });
+  // الحوكمة: حفظ إعدادات الاعتماد
+  const saveAp = document.getElementById('saveApproval');
+  if (saveAp) saveAp.onclick = () => {
+    const st = DB.data.settings;
+    st.approval = st.approval || {};
+    st.approval.enabled = document.getElementById('apEnabled').checked;
+    st.approval.threshold = num(document.getElementById('apThreshold').value);
+    DB.save();
+    Audit.log('update', 'settings', 'دورة الاعتماد', `${st.approval.enabled ? 'مفعّلة' : 'معطّلة'} — حدّ ${fmtMoney(st.approval.threshold)}`);
+    toast('تم حفظ إعدادات الاعتماد ✅');
+  };
   // المستخدمون
   const addUser = document.getElementById('addUserBtn');
   if (addUser) addUser.onclick = () => openUserDialog();
@@ -3493,6 +3811,15 @@ function printReport() {
   w.document.close();
 }
 
+/* تصدير سجل التدقيق Excel */
+function exportAuditCSV() {
+  const rows = Audit.list().map(a => [
+    fmtDateTime(a.at), a.user, ROLES[a.role] || a.role || '',
+    AUDIT_ACTIONS[a.action] || a.action, entityLabel(a.entity), a.ref, a.details,
+  ]);
+  exportCSV('سجل-التدقيق', ['التاريخ', 'المستخدم', 'الدور', 'العملية', 'النوع', 'المرجع', 'التفاصيل'], rows);
+}
+
 /* تصدير ميزان المراجعة Excel */
 function exportTrialCSV() {
   const rows = [];
@@ -3605,6 +3932,7 @@ function init() {
   document.getElementById('homeBtn').onclick = () => App.go('apps');
   document.getElementById('exportBtn').onclick = () => App.go('settings');
   document.getElementById('fab').onclick = () => {
+    if (!Perm.can('create', App.route)) { toast('لا تملك صلاحية الإضافة'); return; }
     if (App.route === 'accounting') {
       if (App.acctTab === 'accounts') openForm('accounts');
       else if (App.acctTab === 'journal') openJournalDialog();

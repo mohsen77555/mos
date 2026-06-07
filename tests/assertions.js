@@ -221,6 +221,48 @@
     App.acctTab = tab; try { Views.accounting(); } catch (e) { ok(false, 'تبويب محاسبة ' + tab); }
   }
 
+  /* 21) الحوكمة: الصلاحيات الدقيقة */
+  (function () {
+    const adm = Perm.caps('admin'), vw = Perm.caps('viewer'), sl = Perm.caps('sales');
+    ok(adm.create && adm.edit && adm.delete && adm.approve, 'المدير يملك كل الصلاحيات');
+    ok(!vw.create && !vw.edit && !vw.delete && !vw.approve, 'المستعرض بلا صلاحيات تعديل');
+    ok(sl.create && sl.edit && !sl.delete && !sl.approve, 'البائع: إضافة/تعديل بلا حذف/اعتماد');
+    DB.data.settings.perms = { sales: Object.assign({}, ROLE_CAPS.sales, { delete: 1 }) };
+    ok(Perm.caps('sales').delete === 1, 'تخصيص الصلاحيات يتجاوز الافتراضي');
+    DB.data.settings.perms = {};
+  })();
+
+  /* 22) الحوكمة: سجل التدقيق */
+  (function () {
+    const before = DB.list('audit').length;
+    Audit.log('create', 'partners', 'اختبار تدقيق', 'تفاصيل');
+    ok(DB.list('audit').length === before + 1, 'إضافة سجل تدقيق');
+    const last = Audit.list()[0];
+    ok(last.action === 'create' && last.entity === 'partners' && !!last.at, 'محتوى سجل التدقيق صحيح');
+  })();
+
+  /* 23) الحوكمة: دورة الاعتماد */
+  (function () {
+    DB.data.settings.approval = { enabled: true, threshold: 1000 };
+    const big = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: cust.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: prod.id, qty: 10, price: 500 }] });
+    confirmDoc('sales', big.id);
+    let d = DB.get('sales', big.id);
+    ok(d.status === 'draft' && d.approval === 'pending', 'المستند فوق الحدّ يُعلَّق للاعتماد');
+    ok(govPendingDocs().some(x => x.d.id === big.id), 'ظهوره في طابور الاعتمادات');
+    approveDoc('sales', big.id);
+    d = DB.get('sales', big.id);
+    ok(d.approval === 'approved' && d.status === 'confirmed', 'الاعتماد يؤكّد المستند');
+    const small = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: cust.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: svc.id, qty: 1, price: 100 }] });
+    confirmDoc('sales', small.id);
+    ok(DB.get('sales', small.id).status === 'confirmed', 'المستند تحت الحدّ يُؤكَّد دون اعتماد');
+    DB.data.settings.approval = { enabled: false, threshold: 5000 };
+  })();
+
+  /* 24) تصيير تبويبات الحوكمة بلا أخطاء */
+  for (const tab of ['compliance', 'approvals', 'audit', 'perms']) {
+    App.govTab = tab; try { ok(typeof Views.governance() === 'string', 'تبويب حوكمة ' + tab); } catch (e) { ok(false, 'تبويب حوكمة ' + tab + ': ' + e.message); }
+  }
+
   /* --- النتيجة --- */
   console.log(`\nنتيجة الاختبارات: ${pass} ناجح، ${fail} فاشل`);
   if (fail) { fails.forEach(f => console.log('  ❌ ' + f)); process.exitCode = 1; }

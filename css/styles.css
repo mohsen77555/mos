@@ -434,6 +434,20 @@ body.dark .card-actions button:active { background: #342d42; }
 .muted-text { color: var(--muted); font-size: .9rem; }
 .divider { height: 1px; background: var(--border); margin: 14px 0; }
 
+/* ===== الحوكمة: مصفوفة الصلاحيات وسجل التدقيق ===== */
+.perm-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 8px; margin-top: 10px;
+}
+.perm-cell {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); font-size: .9rem; cursor: pointer;
+}
+.perm-cell input { width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer; }
+.audit-row .title { font-size: .95rem; }
+body.dark .perm-cell { background: var(--card); }
+
 /* ===== شاشات أكبر ===== */
 @media (min-width: 720px) {
   .stat-grid { grid-template-columns: repeat(3, 1fr); }
