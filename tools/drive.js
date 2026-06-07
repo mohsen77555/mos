@@ -34,6 +34,7 @@ const steps = JSON.parse(process.env.STEPS || '[]');
   for (const st of steps) {
     try {
       if (st.demo)        { await page.evaluate(() => loadDemoData()); }
+      else if (st.shot)   { await page.screenshot({ path: '/tmp/mos-' + st.shot + '.png' }); continue; }
       else if (st.goto)   { await page.evaluate(r => App.go(r), st.goto); }
       else if (st.click)  { await page.click(st.click); }
       else if (st.fill)   { await page.fill(st.fill, String(st.value)); }
