@@ -317,6 +317,35 @@
     ok(typeof Views.assets() === 'string', 'تصيير شاشة الأصول');
   })();
 
+  /* 29) حدّ ائتمان العملاء */
+  (function () {
+    const c = DB.upsert('partners', { name: 'عميل ائتمان', kind: 'customer', creditLimit: 1000 });
+    const p = DB.upsert('products', { name: 'سلعة ائتمان', type: 'service', salePrice: 800, cost: 0 });
+    // فاتورة 1 (800 + ض = 920) ضمن الحدّ → تُؤكَّد
+    const s1 = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: p.id, qty: 1, price: 800 }] });
+    DB.data.settings.credit = { enforce: true };
+    confirmDoc('sales', s1.id);
+    ok(DB.get('sales', s1.id).status === 'confirmed', 'بيع ضمن حدّ الائتمان يُؤكَّد');
+    eq(partnerOutstanding(c.id), 920, 'الرصيد المستحق بعد الفاتورة الأولى');
+    // فاتورة 2 تتجاوز الحدّ مع المنع → تبقى مسودة
+    const s2 = DB.upsert('sales', { ref: DB.nextRef('SO'), partnerId: c.id, date: todayISO(), status: 'draft', paid: 0, currency: 'BASE', rate: 1, lines: [{ productId: p.id, qty: 1, price: 800 }] });
+    confirmDoc('sales', s2.id);
+    ok(DB.get('sales', s2.id).status === 'draft', 'تجاوز حدّ الائتمان يمنع التأكيد (وضع المنع)');
+    // وضع التحذير فقط → يُؤكَّد رغم التجاوز
+    DB.data.settings.credit = { enforce: false };
+    confirmDoc('sales', s2.id);
+    ok(DB.get('sales', s2.id).status === 'confirmed', 'وضع التحذير يسمح بالتأكيد رغم التجاوز');
+    DB.data.settings.credit = { enforce: false };
+  })();
+
+  /* 30) النسب المالية */
+  (function () {
+    App.acctTab = 'ratios';
+    const html = Views.accounting();
+    ok(typeof html === 'string' && html.indexOf('النسبة الجارية') >= 0, 'تصيير النسب المالية');
+    ok(html.indexOf('هامش الربح الإجمالي') >= 0 && html.indexOf('دوران المخزون') >= 0, 'وجود نسب الربحية والنشاط');
+  })();
+
   /* --- النتيجة --- */
   console.log(`\nنتيجة الاختبارات: ${pass} ناجح، ${fail} فاشل`);
   if (fail) { fails.forEach(f => console.log('  ❌ ' + f)); process.exitCode = 1; }

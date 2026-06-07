@@ -55,6 +55,7 @@ const DB = {
         approval: { enabled: false, threshold: 5000 },  // دورة الاعتماد (الحوكمة)
         perms: {},               // تجاوزات الصلاحيات الدقيقة لكل دور { role: {create,edit,delete,approve} }
         budgets: {},             // الموازنات التقديرية { accountId: amount }
+        credit: { enforce: false },  // حدّ الائتمان: منع تجاوز الحدّ (وإلا تحذير فقط)
       },
     };
   },
@@ -679,7 +680,15 @@ const Models = {
   partners: {
     label: 'جهة اتصال', plural: 'جهات الاتصال', icon: '👥', color: '#0d6efd', menu: true,
     title: r => r.name,
-    subtitle: r => [PARTNER_KIND[r.kind] || '', r.phone || '', r.city || ''].filter(Boolean).join(' • '),
+    subtitle: r => {
+      const base = [PARTNER_KIND[r.kind] || '', r.phone || '', r.city || ''].filter(Boolean).join(' • ');
+      const lim = num(r.creditLimit);
+      if (lim > 0 && (r.kind === 'customer' || r.kind === 'both')) {
+        const out = partnerOutstanding(r.id);
+        return base + ` • ائتمان: ${fmtMoney(out)} / ${fmtMoney(lim)}${out > lim ? ' ⚠️' : ''}`;
+      }
+      return base;
+    },
     badge: r => ({ text: PARTNER_KIND[r.kind] || '—', cls: r.kind === 'vendor' ? 'info' : 'ok' }),
     searchFields: ['name', 'phone', 'email', 'city', 'vat'],
     rowActions: r => `<button data-statement="${r.id}">📄 كشف حساب</button>`,
@@ -690,6 +699,7 @@ const Models = {
       { name: 'email', label: 'البريد الإلكتروني', type: 'email' },
       { name: 'vat', label: 'الرقم الضريبي', type: 'text' },
       { name: 'city', label: 'المدينة', type: 'text' },
+      { name: 'creditLimit', label: 'حدّ الائتمان (للعملاء — 0 = بلا حدّ)', type: 'number', default: 0 },
       { name: 'address', label: 'العنوان', type: 'textarea' },
       { name: 'note', label: 'ملاحظات', type: 'textarea' },
     ],
@@ -866,6 +876,17 @@ function docTotals(doc) {
   return { subtotal: +subtotal.toFixed(2), tax, total, paid, due: +(total - paid).toFixed(2) };
 }
 
+/* إجمالي رصيد العميل المستحق (ذمم مدينة) بالعملة الأساسية */
+function partnerOutstanding(partnerId, exceptDocId) {
+  let sum = 0;
+  DB.list('sales').forEach(d => {
+    if (d.partnerId !== partnerId || d.status !== 'confirmed') return;
+    if (exceptDocId && d.id === exceptDocId) return;
+    sum += toBase(docTotals(d).due, d);
+  });
+  return +sum.toFixed(2);
+}
+
 /* تأكيد مستند: ترحيل حركات المخزون وتحديث الكميات */
 function confirmDoc(coll, id) {
   const doc = DB.get(coll, id);
@@ -882,6 +903,23 @@ function confirmDoc(coll, id) {
     }
     toast('🔒 المستند يتجاوز حدّ الاعتماد — بانتظار موافقة المدير');
     return;
+  }
+  // حدّ ائتمان العميل: تحذير أو منع عند تجاوز الرصيد المستحق للحدّ
+  if (coll === 'sales') {
+    const cust = DB.get('partners', doc.partnerId);
+    const limit = num(cust && cust.creditLimit);
+    if (limit > 0) {
+      const projected = partnerOutstanding(doc.partnerId, doc.id) + toBase(docTotals(doc).total, doc);
+      if (projected > limit) {
+        const over = fmtMoney(projected - limit);
+        if ((DB.data.settings.credit || {}).enforce) {
+          Audit.log('reject', coll, doc.ref, `تجاوز حدّ الائتمان بـ ${over}`);
+          toast(`⛔ تجاوز حدّ ائتمان «${cust.name}» بـ ${over} — مُنِع التأكيد`);
+          return;
+        }
+        toast(`⚠️ تنبيه: تجاوز حدّ ائتمان «${cust.name}» بـ ${over}`);
+      }
+    }
   }
   const isSale = coll === 'sales';
   const sign = isSale ? -1 : +1;            // البيع يُنقص المخزون، الشراء يزيده
@@ -1472,7 +1510,7 @@ const Views = {
     const tabs = [
       ['accounts', 'شجرة الحسابات'], ['journal', 'القيود'], ['trial', 'ميزان المراجعة'],
       ['ledger', 'دفتر الأستاذ'], ['pl', 'قائمة الدخل'], ['bs', 'الميزانية'],
-      ['aging', 'أعمار الذمم'], ['budget', 'الموازنات'], ['vat', 'ضريبة VAT'], ['close', 'الإقفال'],
+      ['aging', 'أعمار الذمم'], ['budget', 'الموازنات'], ['ratios', 'النسب المالية'], ['vat', 'ضريبة VAT'], ['close', 'الإقفال'],
     ];
     let html = `<div class="acct-tabs">` + tabs.map(([k, l]) =>
       `<button class="acct-tab ${App.acctTab === k ? 'active' : ''}" data-actab="${k}">${l}</button>`).join('') + `</div>`;
@@ -1974,11 +2012,16 @@ const Views = {
           <label>حدّ الاعتماد — المستندات التي يساوي إجماليها هذا الحدّ أو يزيد تحتاج موافقة مدير قبل التأكيد</label>
           <input type="number" id="apThreshold" inputmode="decimal" step="any" min="0" value="${num(s.approval && s.approval.threshold)}"/>
         </div>
+        <div class="divider"></div>
+        <label class="perm-cell" style="font-size:1rem">
+          <input type="checkbox" id="creditEnforce" ${s.credit && s.credit.enforce ? 'checked' : ''}/>
+          <span>منع تأكيد البيع عند تجاوز حدّ ائتمان العميل (وإلا تحذير فقط)</span>
+        </label>
         <div class="card-actions">
-          <button class="mini-btn" id="saveApproval">💾 حفظ إعدادات الاعتماد</button>
+          <button class="mini-btn" id="saveApproval">💾 حفظ الإعدادات</button>
           <button class="mini-btn" data-go="governance">🛡️ فتح لوحة الحوكمة</button>
         </div>
-        <div class="meta" style="margin-top:8px">يضبط المدير صلاحيات الأدوار وسجل التدقيق من لوحة الحوكمة.</div>
+        <div class="meta" style="margin-top:8px">يضبط المدير صلاحيات الأدوار وسجل التدقيق من لوحة الحوكمة. حدّ الائتمان يُحدَّد لكل عميل من «جهات الاتصال».</div>
       </div>
 
       <div class="section-title">ℹ️ عن النظام</div>
@@ -2361,6 +2404,60 @@ const AcctViews = {
       ${reportRow('إجمالي الموازنات', fmtMoney(tBudget))}
       ${reportRow('إجمالي الفعلي', fmtMoney(tActual), true)}</div>`;
     return html;
+  },
+
+  /* النسب المالية والتحليل */
+  ratios() {
+    const rb = role => { const a = DB.get('accounts', Acct.id(role)); return a ? Acct.balance(a) : 0; };
+    const curAssets = rb('cash') + rb('bank') + rb('ar') + rb('inventory') + rb('vatIn');
+    const curLiab = rb('ap') + rb('vatOut') + rb('salaryPayable');
+    const invVal = rb('inventory');
+    const totalAssets = Acct.sumType('asset');
+    const totalLiab = Acct.sumType('liability');
+    const equity = Acct.sumType('equity') + Acct.netProfit();
+    const sales = rb('sales');
+    const cogs = rb('cogs');
+    const gross = sales - cogs;
+    const net = Acct.netProfit();
+
+    const card = (icon, title, value, status, hint) => {
+      const badge = status ? `<span class="badge ${status}">${{ ok: 'جيد', warn: 'متوسط', danger: 'منخفض' }[status]}</span>` : '';
+      return `<div class="card"><div class="row"><div class="title">${icon} ${title}</div>${badge}</div>
+        <div class="num-big">${value}</div>${hint ? `<div class="meta">${esc(hint)}</div>` : ''}</div>`;
+    };
+    const ratio = (a, b) => b !== 0 ? a / b : null;
+    const fr = v => v == null ? '—' : v.toFixed(2);
+    const pc = v => v == null ? '—' : (v >= 0 ? '' : '−') + Math.abs(v).toFixed(1) + '%';
+
+    const cur = ratio(curAssets, curLiab);
+    const quick = ratio(curAssets - invVal, curLiab);
+    const wc = curAssets - curLiab;
+    const gm = sales ? gross / sales * 100 : null;
+    const nm = sales ? net / sales * 100 : null;
+    const de = ratio(totalLiab, equity);
+    const da = totalAssets ? totalLiab / totalAssets * 100 : null;
+    const turn = ratio(cogs, invVal);
+    const roa = totalAssets ? net / totalAssets * 100 : null;
+
+    const liqStat = v => v == null ? null : v >= 2 ? 'ok' : v >= 1 ? 'warn' : 'danger';
+    const quickStat = v => v == null ? null : v >= 1 ? 'ok' : v >= 0.7 ? 'warn' : 'danger';
+    const marginStat = v => v == null ? null : v > 10 ? 'ok' : v > 0 ? 'warn' : 'danger';
+    const deStat = v => v == null ? null : v <= 1 ? 'ok' : v <= 2 ? 'warn' : 'danger';
+    const daStat = v => v == null ? null : v <= 50 ? 'ok' : v <= 70 ? 'warn' : 'danger';
+
+    return `<div class="muted-text" style="margin-bottom:10px">مؤشرات مالية محسوبة من الأرصدة الحالية (بالعملة الأساسية).</div>
+      <div class="section-title">السيولة</div>
+      ${card('💧', 'النسبة الجارية', fr(cur), liqStat(cur), 'الأصول المتداولة ÷ الالتزامات المتداولة')}
+      ${card('⚡', 'النسبة السريعة', fr(quick), quickStat(quick), '(الأصول المتداولة − المخزون) ÷ الالتزامات المتداولة')}
+      ${card('🧮', 'رأس المال العامل', fmtMoney(wc), wc >= 0 ? 'ok' : 'danger', 'الأصول المتداولة − الالتزامات المتداولة')}
+      <div class="section-title">الربحية</div>
+      ${card('📈', 'هامش الربح الإجمالي', pc(gm), marginStat(gm), '(المبيعات − تكلفة البضاعة) ÷ المبيعات')}
+      ${card('💰', 'هامش الربح الصافي', pc(nm), marginStat(nm), 'صافي الربح ÷ المبيعات')}
+      ${card('🏦', 'العائد على الأصول', pc(roa), marginStat(roa), 'صافي الربح ÷ إجمالي الأصول')}
+      <div class="section-title">المديونية والنشاط</div>
+      ${card('⚖️', 'الدين إلى حقوق الملكية', fr(de), deStat(de), 'إجمالي الالتزامات ÷ حقوق الملكية')}
+      ${card('📊', 'نسبة الدين إلى الأصول', pc(da), daStat(da), 'إجمالي الالتزامات ÷ إجمالي الأصول')}
+      ${card('🔄', 'دوران المخزون', fr(turn), null, 'تكلفة البضاعة المباعة ÷ قيمة المخزون')}`;
   },
 
   /* تقرير ضريبة القيمة المضافة (إقرار VAT) */
@@ -3823,9 +3920,12 @@ function bindViewEvents() {
     st.approval = st.approval || {};
     st.approval.enabled = document.getElementById('apEnabled').checked;
     st.approval.threshold = num(document.getElementById('apThreshold').value);
+    st.credit = st.credit || {};
+    const ce = document.getElementById('creditEnforce');
+    if (ce) st.credit.enforce = ce.checked;
     DB.save();
-    Audit.log('update', 'settings', 'دورة الاعتماد', `${st.approval.enabled ? 'مفعّلة' : 'معطّلة'} — حدّ ${fmtMoney(st.approval.threshold)}`);
-    toast('تم حفظ إعدادات الاعتماد ✅');
+    Audit.log('update', 'settings', 'الاعتماد والائتمان', `اعتماد ${st.approval.enabled ? 'مفعّل' : 'معطّل'} — ائتمان ${st.credit.enforce ? 'منع' : 'تحذير'}`);
+    toast('تم حفظ الإعدادات ✅');
   };
   // المستخدمون
   const addUser = document.getElementById('addUserBtn');
